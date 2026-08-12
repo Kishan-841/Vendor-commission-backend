@@ -1,0 +1,24 @@
+# Dependencies & build output
+node_modules/
+dist/
+*.tsbuildinfo
+
+# Environment — commit only the *.example templates, never real secrets
+.env
+.env.local
+.env.production
+.env.*.local
+
+# Runtime data (persisted via docker volumes in production)
+uploads/
+generated/
+
+# Logs
+*.log
+npm-debug.log*
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

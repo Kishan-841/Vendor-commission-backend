@@ -1,0 +1,501 @@
+// Vendor Commission Management System (VCMS) — Prisma schema
+// Phase 1 tables. Design notes:
+//  - Money is stored as Decimal(18,2); percentages as Decimal(7,4) (e.g. 8.0000 = 8%).
+//  - Zone rows keep the raw Excel row in `zoneData` (Json) so new columns never require a migration.
+//  - Commission calculations SNAPSHOT vendor tax rates at calc time, so later vendor edits
+//    never retroactively change an approved/billed calculation.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ---------------------------------------------------------------------------
+// Enums
+// ---------------------------------------------------------------------------
+
+enum Role {
+  ADMIN
+  FINANCE
+}
+
+enum UserStatus {
+  ACTIVE
+  INACTIVE
+}
+
+enum VendorStatus {
+  ACTIVE
+  INACTIVE
+}
+
+enum CalculationStatus {
+  DRAFT
+  SUBMITTED
+  APPROVED
+  REJECTED
+}
+
+enum ApprovalAction {
+  SUBMITTED
+  APPROVED
+  REJECTED
+}
+
+// Master zones are uploaded once as two typed sheets; vendors then pick from them.
+enum ZoneType {
+  NEW
+  RENEWAL
+}
+
+// Payout tracking on an APPROVED calculation: derived from sum(payments)
+// vs finalPayable. PENDING = nothing paid yet.
+enum PayoutStatus {
+  PENDING
+  PARTIAL
+  PAID
+}
+
+enum PaymentMode {
+  BANK_TRANSFER
+  UPI
+  CHEQUE
+  CASH
+  OTHER
+}
+
+// ---------------------------------------------------------------------------
+// Users & auth
+// ---------------------------------------------------------------------------
+
+model User {
+  id           String     @id @default(cuid())
+  name         String
+  email        String     @unique
+  passwordHash String
+  role         Role       @default(FINANCE)
+  status       UserStatus @default(ACTIVE)
+  createdAt    DateTime   @default(now())
+  updatedAt    DateTime   @updatedAt
+
+  // Reverse relations (audit / ownership)
+  vendorsCreated      Vendor[]                @relation("VendorCreatedBy")
+  zoneUploads         ZoneUpload[]
+  calculationsCreated CommissionCalculation[] @relation("CalcCreatedBy")
+  approvalActions     Approval[]              @relation("ApprovalActor")
+  billsGenerated      Bill[]                  @relation("BillGeneratedBy")
+  auditLogs           AuditLog[]
+  salesUploads        SalesUpload[]
+  paymentsMade        PayoutPayment[]         @relation("PaymentPaidBy")
+
+  @@map("users")
+}
+
+// ---------------------------------------------------------------------------
+// Monthly sales uploads (drive vendor-wise commission generation)
+// ---------------------------------------------------------------------------
+
+// One uploaded sales sheet for a month + type. New and Renewal are uploaded as
+// two separate files/records; every row in a file takes the upload's salesType.
+// (salesType is nullable only for legacy single-file uploads.)
+model SalesUpload {
+  id           String    @id @default(cuid())
+  month        String // YYYY-MM
+  salesType    ZoneType? // NEW or RENEWAL (null = legacy mixed upload)
+  fileName     String
+  filePath     String? // original file persisted to UPLOAD_DIR for download
+  rowCount     Int       @default(0)
+  columns      Json?
+  // Locking: a sheet is locked on upload; only an admin can unlock/replace it.
+  locked       Boolean   @default(true)
+  status       String    @default("UPLOADED")
+  version      Int       @default(1)
+  uploadedById String?
+  uploadedBy   User?     @relation(fields: [uploadedById], references: [id])
+  createdAt    DateTime  @default(now())
+
+  rows SalesRow[]
+
+  @@unique([month, salesType])
+  @@map("sales_uploads")
+}
+
+// One row of the uploaded sales sheet with every known column stored in a
+// dedicated field (Sales Summary reads these). Headers we don't recognize
+// land in `extra` JSON so no data is ever lost.
+model SalesRow {
+  id       String      @id @default(cuid())
+  uploadId String
+  upload   SalesUpload @relation(fields: [uploadId], references: [id], onDelete: Cascade)
+
+  salesType  ZoneType // derived: "Activation" -> NEW, "Renewal" -> RENEWAL
+  zoneName   String
+  planAmount Decimal  @db.Decimal(18, 2)
+
+  userName          String?
+  customerName      String? // sheet header "Name"
+  pinCode           String?
+  salesPerson       String?
+  address           String?
+  mobileNo          String?
+  expiryDate        DateTime?
+  modeOfRenew       String?
+  billNo            String?
+  activationType    String? // raw sheet value
+  billDate          DateTime?
+  clientGst         String?
+  companyGstNo      String?
+  sgst              Decimal?  @db.Decimal(18, 2)
+  cgst              Decimal?  @db.Decimal(18, 2)
+  billAmount        Decimal?  @db.Decimal(18, 2)
+  adjustedAmount    Decimal?  @db.Decimal(18, 2)
+  actualBillAmount  Decimal?  @db.Decimal(18, 2)
+  discountAmount    Decimal?  @db.Decimal(18, 2)
+  userPendingAmount Decimal?  @db.Decimal(18, 2)
+  site              String?
+  buildingName      String?
+  operatorName      String?
+  franchiseeName    String?
+  userCurrentStatus String?
+  onlineTransactionNo String?
+  inquiryRemarks    String?
+  remarks           String?
+  planName          String?
+
+  extra Json?
+
+  @@index([uploadId])
+  @@index([zoneName])
+  @@index([billNo])
+  @@index([salesType])
+  @@map("sales_rows")
+}
+
+// ---------------------------------------------------------------------------
+// Vendors
+// ---------------------------------------------------------------------------
+
+model Vendor {
+  id          String       @id @default(cuid())
+  companyName String?
+  vendorName  String
+  address     String?
+  mobileNumber String?
+  email       String?
+
+  // Tax details
+  panNumber String?
+  gstNumber String? // optional; presence drives GST in calculations
+
+  // AGR
+  agrApplicable Boolean @default(false)
+  agrPercentage Decimal @default(0) @db.Decimal(7, 4)
+
+  // TDS
+  tdsPercentage Decimal @default(0) @db.Decimal(7, 4)
+
+  // Fixed Vendor Pay — a flat recurring amount added on top of the performance
+  // (sales) commission. Amount is null unless the toggle is enabled.
+  fixedPayEnabled Boolean  @default(false)
+  fixedPayAmount  Decimal? @db.Decimal(18, 2)
+
+  status VendorStatus @default(ACTIVE)
+
+  createdById String?
+  createdBy   User?   @relation("VendorCreatedBy", fields: [createdById], references: [id])
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  bankDetails  VendorBankDetail?
+  documents    VendorDocument[]
+  // Explicit join: each row assigns a master zone under a type (NEW/RENEWAL)
+  // with its own commission %. The same zone can be assigned under both types.
+  zoneAssignments VendorZone[]
+  calculations CommissionCalculation[]
+  bills        Bill[]
+
+  @@index([status])
+  @@index([vendorName])
+  @@map("vendors")
+}
+
+model VendorBankDetail {
+  id            String  @id @default(cuid())
+  vendorId      String  @unique
+  vendor        Vendor  @relation(fields: [vendorId], references: [id], onDelete: Cascade)
+  bankName      String?
+  accountHolder String?
+  accountNumber String?
+  ifscCode      String?
+  branch        String?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  @@map("vendor_bank_details")
+}
+
+model VendorDocument {
+  id         String   @id @default(cuid())
+  vendorId   String
+  vendor     Vendor   @relation(fields: [vendorId], references: [id], onDelete: Cascade)
+  label      String
+  filePath   String
+  mimeType   String?
+  sizeBytes  Int?
+  createdAt  DateTime @default(now())
+
+  @@index([vendorId])
+  @@map("vendor_documents")
+}
+
+// ---------------------------------------------------------------------------
+// Zones (imported from Excel)
+// ---------------------------------------------------------------------------
+
+model ZoneUpload {
+  id           String   @id @default(cuid())
+  fileName     String
+  rowCount     Int      @default(0)
+  columns      Json?    // detected header names, for UI display
+  uploadedById String?
+  uploadedBy   User?    @relation(fields: [uploadedById], references: [id])
+  createdAt    DateTime @default(now())
+
+  zones Zone[]
+
+  @@map("zone_uploads")
+}
+
+// A plain master zone — uploaded once as a single sheet. The New/Renewal type
+// and commission % live on the VendorZone assignment, not on the zone itself.
+model Zone {
+  id String @id @default(cuid())
+
+  uploadId String?
+  upload   ZoneUpload? @relation(fields: [uploadId], references: [id], onDelete: SetNull)
+
+  name     String // renamable; defaults from the Excel "Zone" column
+  zoneData Json   // raw row: { zone, city, circle, vendor, sales, ... }
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  assignments VendorZone[]
+  breakdowns  CommissionZoneBreakdown[]
+
+  @@index([name])
+  @@map("zones")
+}
+
+// Vendor ↔ Zone assignment carrying the type and the commission %. A vendor may
+// hold the same zone under both NEW and RENEWAL, each with a different %.
+model VendorZone {
+  id                   String   @id @default(cuid())
+  vendorId             String
+  vendor               Vendor   @relation(fields: [vendorId], references: [id], onDelete: Cascade)
+  zoneId               String
+  zone                 Zone     @relation(fields: [zoneId], references: [id], onDelete: Cascade)
+  zoneType             ZoneType
+  commissionPercentage Decimal  @db.Decimal(7, 4)
+  createdAt            DateTime @default(now())
+
+  @@unique([vendorId, zoneId, zoneType])
+  @@index([vendorId])
+  @@index([zoneId])
+  @@map("vendor_zones")
+}
+
+// ---------------------------------------------------------------------------
+// Commission calculations
+// ---------------------------------------------------------------------------
+
+model CommissionCalculation {
+  id            String @id @default(cuid())
+  vendorId      String
+  vendor        Vendor @relation(fields: [vendorId], references: [id])
+
+  month         String  // e.g. "2026-07"
+  billingPeriod String? // free text, e.g. "01 Jul 2026 - 31 Jul 2026"
+
+  // Inputs / snapshots (rates copied from vendor at calc time)
+  totalSales    Decimal @db.Decimal(18, 2)
+  agrApplicable Boolean @default(false)
+  agrPercentage Decimal @default(0) @db.Decimal(7, 4)
+  gstPercentage Decimal @default(0) @db.Decimal(7, 4)
+  tdsPercentage Decimal @default(0) @db.Decimal(7, 4)
+
+  // Derived amounts
+  agrAmount       Decimal @default(0) @db.Decimal(18, 2)
+  salesAfterAgr   Decimal @default(0) @db.Decimal(18, 2)
+  grossCommission Decimal @default(0) @db.Decimal(18, 2)
+  gstAmount       Decimal @default(0) @db.Decimal(18, 2)
+  tdsAmount       Decimal @default(0) @db.Decimal(18, 2)
+  // Fixed pay snapshot; finalPayable = (gross + gst - tds) + fixedPayAmount.
+  fixedPayAmount  Decimal @default(0) @db.Decimal(18, 2)
+  finalPayable    Decimal @default(0) @db.Decimal(18, 2)
+
+  status CalculationStatus @default(DRAFT)
+
+  // Payout tracking (meaningful once APPROVED). `paidAmount` caches
+  // sum(payments.paidAmount) so lists/aggregates never join payments.
+  paymentStatus PayoutStatus @default(PENDING)
+  paidAmount    Decimal      @default(0) @db.Decimal(18, 2)
+
+  createdById String?
+  createdBy   User?    @relation("CalcCreatedBy", fields: [createdById], references: [id])
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  breakdowns CommissionZoneBreakdown[]
+  approvals  Approval[]
+  bill       Bill?
+  payments   PayoutPayment[]
+
+  @@index([vendorId])
+  @@index([status])
+  @@index([month])
+  @@index([paymentStatus])
+  @@map("commission_calculations")
+}
+
+// One payment made against an approved calculation's payable. Multiple
+// payments accumulate toward finalPayable (partial payouts).
+model PayoutPayment {
+  id            String                @id @default(cuid())
+  calculationId String
+  calculation   CommissionCalculation @relation(fields: [calculationId], references: [id], onDelete: Cascade)
+
+  receiptNumber    String?     @unique // e.g. RCPT-202607-0001 (generated at creation)
+  paidAmount       Decimal     @db.Decimal(18, 2)
+  paymentDate      DateTime
+  paymentMode      PaymentMode @default(BANK_TRANSFER)
+  paymentReference String?
+  notes            String?
+  attachmentPath   String? // optional uploaded receipt image/PDF
+
+  paidById String?
+  paidBy   User?    @relation("PaymentPaidBy", fields: [paidById], references: [id])
+  createdAt DateTime @default(now())
+
+  @@index([calculationId])
+  @@index([paymentDate])
+  @@map("payout_payments")
+}
+
+model CommissionZoneBreakdown {
+  id            String @id @default(cuid())
+  calculationId String
+  calculation   CommissionCalculation @relation(fields: [calculationId], references: [id], onDelete: Cascade)
+
+  zoneId   String?
+  zone     Zone?   @relation(fields: [zoneId], references: [id], onDelete: SetNull)
+  zoneName String    // snapshot of the zone name at calc time
+  zoneType ZoneType? // NEW or RENEWAL — the assignment this line came from
+
+  commissionPercentage Decimal @db.Decimal(7, 4)
+  baseAmount           Decimal @db.Decimal(18, 2) // salesAfterAgr used as the base
+  commissionAmount     Decimal @db.Decimal(18, 2)
+
+  createdAt DateTime @default(now())
+
+  @@index([calculationId])
+  @@map("commission_zone_breakdowns")
+}
+
+// ---------------------------------------------------------------------------
+// Approval workflow (audit trail — one row per action)
+// ---------------------------------------------------------------------------
+
+model Approval {
+  id            String @id @default(cuid())
+  calculationId String
+  calculation   CommissionCalculation @relation(fields: [calculationId], references: [id], onDelete: Cascade)
+
+  action    ApprovalAction
+  remarks   String?
+  actorId   String?
+  actor     User?   @relation("ApprovalActor", fields: [actorId], references: [id])
+  createdAt DateTime @default(now())
+
+  @@index([calculationId])
+  @@map("approvals")
+}
+
+// ---------------------------------------------------------------------------
+// Bills
+// ---------------------------------------------------------------------------
+
+model Bill {
+  id            String @id @default(cuid())
+  billNumber    String @unique
+  calculationId String @unique
+  calculation   CommissionCalculation @relation(fields: [calculationId], references: [id])
+  vendorId      String
+  vendor        Vendor @relation(fields: [vendorId], references: [id])
+
+  billingMonth String
+
+  // Snapshot of amounts at generation time
+  grossCommission Decimal @db.Decimal(18, 2)
+  gstAmount       Decimal @db.Decimal(18, 2)
+  tdsAmount       Decimal @db.Decimal(18, 2)
+  fixedPayAmount  Decimal @default(0) @db.Decimal(18, 2)
+  finalPayable    Decimal @db.Decimal(18, 2)
+
+  pdfPath String?
+
+  generatedById String?
+  generatedBy   User?    @relation("BillGeneratedBy", fields: [generatedById], references: [id])
+  generatedAt   DateTime @default(now())
+
+  items BillItem[]
+
+  @@index([vendorId])
+  @@map("bills")
+}
+
+model BillItem {
+  id       String @id @default(cuid())
+  billId   String
+  bill     Bill   @relation(fields: [billId], references: [id], onDelete: Cascade)
+
+  description          String // zone name / label
+  commissionPercentage Decimal? @db.Decimal(7, 4)
+  baseAmount           Decimal? @db.Decimal(18, 2)
+  amount               Decimal  @db.Decimal(18, 2)
+
+  @@index([billId])
+  @@map("bill_items")
+}
+
+// ---------------------------------------------------------------------------
+// Audit logs & settings
+// ---------------------------------------------------------------------------
+
+model AuditLog {
+  id         String  @id @default(cuid())
+  userId     String?
+  user       User?   @relation(fields: [userId], references: [id])
+  action     String  // e.g. "VENDOR_CREATED"
+  entityType String? // e.g. "Vendor"
+  entityId   String?
+  metadata   Json?
+  createdAt  DateTime @default(now())
+
+  @@index([entityType, entityId])
+  @@index([createdAt])
+  @@map("audit_logs")
+}
+
+model Setting {
+  id        String   @id @default(cuid())
+  key       String   @unique
+  value     Json
+  updatedAt DateTime @updatedAt
+
+  @@map("settings")
+}

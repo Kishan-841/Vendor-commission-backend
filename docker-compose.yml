@@ -1,0 +1,42 @@
+# VCMS backend — API + Postgres. Runs alongside the other VM projects.
+# Host port 5005 is free (5001–5004, 5500, 5432 are already taken).
+# The DB is NOT published to the host (internal docker network only), so it
+# can't clash with the other Postgres containers.
+
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    volumes:
+      - vcms-db:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    # To inspect the DB from the host, uncomment (pick a free port, e.g. 5433):
+    # ports:
+    #   - "127.0.0.1:5433:5432"
+
+  api:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      # host 5005 → container 4000. Bound to localhost; Caddy proxies public HTTPS.
+      - "127.0.0.1:5005:4000"
+    volumes:
+      - vcms-uploads:/data/uploads
+      - vcms-generated:/data/generated
+
+volumes:
+  vcms-db:
+  vcms-uploads:
+  vcms-generated:
