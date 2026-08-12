@@ -1,7 +1,7 @@
 import type { PayoutStatus } from '@prisma/client';
 import { prisma } from '../../lib/prisma.js';
 import { ApiError } from '../../utils/ApiError.js';
-import { writeAudit } from '../../lib/audit.js';
+import { writeAudit, diffChanges } from '../../lib/audit.js';
 import { pageMeta } from '../../utils/apiResponse.js';
 import { storage } from '../../lib/storage.js';
 import { generateReceiptPdf, generateLedgerPdf } from '../../lib/pdf.js';
@@ -320,7 +320,17 @@ export async function updatePayment(
     action: 'PAYMENT_UPDATED',
     entityType: 'PayoutPayment',
     entityId: paymentId,
-    metadata: { calculationId: payment.calculation.id, paidAmount: input.paidAmount },
+    metadata: {
+      calculationId: payment.calculation.id,
+      paidAmount: input.paidAmount,
+      changes: diffChanges(payment as unknown as Record<string, unknown>, {
+        paidAmount: input.paidAmount,
+        paymentDate: new Date(`${input.paymentDate}T00:00:00Z`),
+        paymentMode: input.paymentMode,
+        paymentReference: input.paymentReference || null,
+        notes: input.notes || null,
+      }),
+    },
   });
 
   return { payment: updatedPayment, calculation: updatedCalc };

@@ -483,11 +483,14 @@ model AuditLog {
   action     String  // e.g. "VENDOR_CREATED"
   entityType String? // e.g. "Vendor"
   entityId   String?
+  ip         String? // client IP; null for rows written before IP capture
   metadata   Json?
   createdAt  DateTime @default(now())
 
   @@index([entityType, entityId])
   @@index([createdAt])
+  @@index([userId])
+  @@index([action])
   @@map("audit_logs")
 }
 

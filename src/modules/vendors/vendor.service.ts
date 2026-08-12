@@ -1,7 +1,7 @@
 import { Prisma } from '@prisma/client';
 import { prisma } from '../../lib/prisma.js';
 import { ApiError } from '../../utils/ApiError.js';
-import { writeAudit } from '../../lib/audit.js';
+import { writeAudit, diffChanges } from '../../lib/audit.js';
 import { pageMeta } from '../../utils/apiResponse.js';
 import type {
   CreateVendorInput,
@@ -137,7 +137,12 @@ export async function updateVendor(id: string, input: UpdateVendorInput, actorId
     action: 'VENDOR_UPDATED',
     entityType: 'Vendor',
     entityId: vendor.id,
-    metadata: { changed: Object.keys(data) },
+    metadata: {
+      changed: Object.keys(data),
+      changes: diffChanges(existing as unknown as Record<string, unknown>, data),
+      ...(bankDetails ? { bankDetailsUpdated: true } : {}),
+      ...(zoneAssignments ? { zoneAssignmentsReplaced: zoneAssignments.length } : {}),
+    },
   });
 
   return vendor;

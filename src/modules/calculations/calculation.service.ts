@@ -1,7 +1,7 @@
 import { Prisma } from '@prisma/client';
 import { prisma } from '../../lib/prisma.js';
 import { ApiError } from '../../utils/ApiError.js';
-import { writeAudit } from '../../lib/audit.js';
+import { writeAudit, diffChanges } from '../../lib/audit.js';
 import { pageMeta } from '../../utils/apiResponse.js';
 import { getNumberSetting, DEFAULT_GST_KEY } from '../../lib/settings.js';
 import { computeCommission, type CommissionInput } from './commission.engine.js';
@@ -198,6 +198,14 @@ export async function updateCalculation(
     action: 'CALCULATION_UPDATED',
     entityType: 'CommissionCalculation',
     entityId: id,
+    metadata: {
+      changes: diffChanges(existing as unknown as Record<string, unknown>, {
+        month: merged.month,
+        totalSales: merged.totalSales,
+        finalPayable: result.finalPayable,
+        grossCommission: result.grossCommission,
+      }),
+    },
   });
 
   return calc;

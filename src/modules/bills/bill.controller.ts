@@ -2,6 +2,7 @@ import type { Request, Response } from 'express';
 import { asyncHandler } from '../../utils/asyncHandler.js';
 import { ok } from '../../utils/apiResponse.js';
 import { sendDownload } from '../../utils/sendDownload.js';
+import { writeAudit } from '../../lib/audit.js';
 import * as billService from './bill.service.js';
 
 export const generateBillHandler = asyncHandler(async (req: Request, res: Response) => {
@@ -22,5 +23,11 @@ export const getBillHandler = asyncHandler(async (req: Request, res: Response) =
 // Streams the generated PDF (from object storage) as an attachment.
 export const downloadBillHandler = asyncHandler(async (req: Request, res: Response) => {
   const { stream, contentLength, fileName } = await billService.getBillForDownload(req.params.id);
+  await writeAudit({
+    userId: req.user!.id,
+    action: 'BILL_DOWNLOADED',
+    entityType: 'Bill',
+    entityId: req.params.id,
+  });
   sendDownload(res, stream, { fileName, contentType: 'application/pdf', contentLength });
 });

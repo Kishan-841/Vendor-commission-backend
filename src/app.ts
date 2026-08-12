@@ -5,9 +5,14 @@ import morgan from 'morgan';
 import { env, isProd } from './config/env.js';
 import { errorHandler, notFoundHandler } from './middleware/errorHandler.js';
 import { apiRouter } from './routes.js';
+import { requestContext } from './lib/request-context.js';
 
 export function createApp() {
   const app = express();
+
+  // One trusted hop (the local nginx proxy) so req.ip is the real client
+  // address from X-Forwarded-For, not 127.0.0.1.
+  app.set('trust proxy', 1);
 
   app.use(helmet());
   // In dev, reflect any localhost origin so the frontend port (3000/3002/…)
@@ -36,6 +41,7 @@ export function createApp() {
 
   app.get('/health', (_req, res) => res.json({ success: true, data: { status: 'ok' } }));
 
+  app.use(requestContext);
   app.use('/api', apiRouter);
 
   app.use(notFoundHandler);

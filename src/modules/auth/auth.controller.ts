@@ -12,3 +12,8 @@ export const meHandler = asyncHandler(async (req: Request, res: Response) => {
   const profile = await authService.getProfile(req.user!.id);
   return ok(res, profile);
 });
+
+export const logoutHandler = asyncHandler(async (req: Request, res: Response) => {
+  const result = await authService.logout(req.user!.id);
+  return ok(res, result);
+});

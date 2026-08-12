@@ -3,6 +3,7 @@ import type { PayoutStatus } from '@prisma/client';
 import { asyncHandler } from '../../utils/asyncHandler.js';
 import { ok } from '../../utils/apiResponse.js';
 import { sendDownload } from '../../utils/sendDownload.js';
+import { writeAudit } from '../../lib/audit.js';
 import { storage, contentTypeFor, safeFilePart } from '../../lib/storage.js';
 import {
   listVendorPayouts,
@@ -84,8 +85,14 @@ export const vendorLedgerPdfHandler = asyncHandler(async (req: Request, res: Res
   sendDownload(res, buffer, { fileName, contentType: 'application/pdf' });
 });
 
-export const exportPayoutsHandler = asyncHandler(async (_req: Request, res: Response) => {
+export const exportPayoutsHandler = asyncHandler(async (req: Request, res: Response) => {
   const csv = await exportPayoutsCsv();
+  await writeAudit({
+    userId: req.user!.id,
+    action: 'PAYOUTS_EXPORTED',
+    entityType: 'PayoutPayment',
+    metadata: req.query as Record<string, unknown>,
+  });
   res.setHeader('Content-Type', 'text/csv; charset=utf-8');
   res.setHeader('Content-Disposition', 'attachment; filename="vendor-payouts.csv"');
   res.send('﻿' + csv); // BOM so Excel opens ₹/UTF-8 columns correctly

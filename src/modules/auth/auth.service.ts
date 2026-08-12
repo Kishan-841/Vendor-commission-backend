@@ -8,12 +8,22 @@ import type { LoginInput } from './auth.schema.js';
 export async function login(input: LoginInput) {
   const user = await prisma.user.findUnique({ where: { email: input.email } });
   // Same generic message whether the email is unknown or the password is wrong,
-  // so we don't leak which accounts exist.
-  if (!user) throw ApiError.unauthorized('Invalid email or password');
-  if (user.status !== 'ACTIVE') throw ApiError.forbidden('Account is inactive');
+  // so we don't leak which accounts exist. Each failure is audited with the
+  // attempted email + IP so break-in attempts are visible in System Logs.
+  if (!user) {
+    await writeAudit({ action: 'USER_LOGIN_FAILED', entityType: 'User', metadata: { email: input.email, reason: 'unknown_email' } });
+    throw ApiError.unauthorized('Invalid email or password');
+  }
+  if (user.status !== 'ACTIVE') {
+    await writeAudit({ action: 'USER_LOGIN_FAILED', entityType: 'User', entityId: user.id, metadata: { email: input.email, reason: 'inactive_account' } });
+    throw ApiError.forbidden('Account is inactive');
+  }
 
   const valid = await bcrypt.compare(input.password, user.passwordHash);
-  if (!valid) throw ApiError.unauthorized('Invalid email or password');
+  if (!valid) {
+    await writeAudit({ action: 'USER_LOGIN_FAILED', entityType: 'User', entityId: user.id, metadata: { email: input.email, reason: 'wrong_password' } });
+    throw ApiError.unauthorized('Invalid email or password');
+  }
 
   const token = signToken({ sub: user.id, role: user.role, email: user.email });
 
@@ -23,6 +33,11 @@ export async function login(input: LoginInput) {
     token,
     user: { id: user.id, name: user.name, email: user.email, role: user.role },
   };
+}
+
+export async function logout(userId: string) {
+  await writeAudit({ userId, action: 'USER_LOGOUT', entityType: 'User', entityId: userId });
+  return { ok: true };
 }
 
 export async function getProfile(userId: string) {

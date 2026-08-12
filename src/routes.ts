@@ -9,6 +9,7 @@ import { salesRouter, salesSummaryRouter } from './modules/sales/sales.routes.js
 import { payoutRouter } from './modules/payouts/payout.routes.js';
 import { dashboardRouter } from './modules/dashboard/dashboard.routes.js';
 import { reportRouter } from './modules/reports/report.routes.js';
+import { auditRouter } from './modules/audit/audit.routes.js';
 
 // Aggregates all module routers under /api. Each module is added here as it's built.
 export const apiRouter = Router();
@@ -27,3 +28,4 @@ apiRouter.use('/payouts', payoutRouter); // Vendor payout tracking + receipts + 
 apiRouter.use('/dashboard', dashboardRouter); // Overview stats
 apiRouter.use('/reports', reportRouter); // Zone-wise commission report + export
 apiRouter.use('/bills', billRouter); // Module 5
+apiRouter.use('/logs', auditRouter); // System logs (ADMIN)
