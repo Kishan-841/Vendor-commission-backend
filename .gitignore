@@ -9,9 +9,10 @@ dist/
 .env.production
 .env.*.local
 
-# Runtime data (persisted via docker volumes in production)
+# Runtime data (local storage driver; production uses Cloudflare R2)
 uploads/
 generated/
+storage/
 
 # Logs
 *.log

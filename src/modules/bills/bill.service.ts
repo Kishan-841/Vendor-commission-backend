@@ -3,6 +3,7 @@ import { prisma } from '../../lib/prisma.js';
 import { ApiError } from '../../utils/ApiError.js';
 import { writeAudit } from '../../lib/audit.js';
 import { pageMeta } from '../../utils/apiResponse.js';
+import { storage } from '../../lib/storage.js';
 import { generateBillPdf } from '../../lib/pdf.js';
 
 const billInclude = {
@@ -61,9 +62,9 @@ export async function generateBill(calculationId: string, actorId: string) {
     });
   });
 
-  // Render the PDF after the DB commit, then attach its path. If rendering ever
-  // fails, the bill still exists and the PDF can be regenerated.
-  const pdfPath = await generateBillPdf({
+  // Render the PDF after the DB commit, store it, then attach its storage key.
+  // If rendering ever fails, the bill still exists and the PDF can be regenerated.
+  const pdfBuffer = await generateBillPdf({
     billNumber: bill.billNumber,
     generatedAt: bill.generatedAt,
     billingMonth: calc.month,
@@ -90,9 +91,12 @@ export async function generateBill(calculationId: string, actorId: string) {
     finalPayable: Number(bill.finalPayable),
   });
 
+  const pdfKey = `bills/${bill.billNumber.replace(/[\\/]/g, '_')}.pdf`;
+  await storage.put(pdfKey, pdfBuffer, 'application/pdf');
+
   const updated = await prisma.bill.update({
     where: { id: bill.id },
-    data: { pdfPath },
+    data: { pdfPath: pdfKey },
     include: billInclude,
   });
 
@@ -144,5 +148,7 @@ export async function getBillForDownload(id: string) {
   const bill = await prisma.bill.findUnique({ where: { id } });
   if (!bill) throw ApiError.notFound('Bill not found');
   if (!bill.pdfPath) throw ApiError.notFound('Bill PDF is not available');
-  return bill;
+  const { stream, contentLength } = await storage.getStream(bill.pdfPath);
+  const fileName = `${bill.billNumber.replace(/[\\/]/g, '_')}.pdf`;
+  return { stream, contentLength, fileName };
 }

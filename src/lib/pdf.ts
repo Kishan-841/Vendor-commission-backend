@@ -1,7 +1,14 @@
-import fs from 'node:fs';
-import path from 'node:path';
 import PDFDocument from 'pdfkit';
-import { env } from '../config/env.js';
+
+// Collect a PDFKit document into a Buffer (no disk). Callers persist/stream it.
+function docToBuffer(doc: PDFKit.PDFDocument): Promise<Buffer> {
+  return new Promise((resolve, reject) => {
+    const chunks: Buffer[] = [];
+    doc.on('data', (c: Buffer) => chunks.push(c));
+    doc.on('end', () => resolve(Buffer.concat(chunks)));
+    doc.on('error', reject);
+  });
+}
 
 export interface BillPdfData {
   billNumber: string;
@@ -28,20 +35,12 @@ export interface BillPdfData {
 const inr = (n: number) =>
   '₹ ' + n.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 
-// Render a commission bill PDF to GENERATED_DIR and return the absolute path.
+// Render a commission bill PDF and return it as a Buffer (caller stores/streams).
 // Vendor -> Gazon commission bill: header, vendor block, zone-wise line items,
 // then the GST/TDS/final-payable summary.
-export function generateBillPdf(data: BillPdfData): Promise<string> {
-  const dir = path.resolve(env.GENERATED_DIR);
-  fs.mkdirSync(dir, { recursive: true });
-  const filePath = path.join(dir, `${data.billNumber.replace(/[\\/]/g, '_')}.pdf`);
-
-  return new Promise((resolve, reject) => {
-    const doc = new PDFDocument({ size: 'A4', margin: 50 });
-    const stream = fs.createWriteStream(filePath);
-    doc.pipe(stream);
-    stream.on('finish', () => resolve(filePath));
-    stream.on('error', reject);
+export function generateBillPdf(data: BillPdfData): Promise<Buffer> {
+  const doc = new PDFDocument({ size: 'A4', margin: 50 });
+  const done = docToBuffer(doc);
 
     // ── Header ────────────────────────────────────────────────────────────
     doc.fontSize(20).font('Helvetica-Bold').text('GAZON', { continued: false });
@@ -132,8 +131,8 @@ export function generateBillPdf(data: BillPdfData): Promise<string> {
       { align: 'center', width: 495 },
     );
 
-    doc.end();
-  });
+  doc.end();
+  return done;
 }
 
 export interface ReceiptPdfData {
@@ -150,17 +149,9 @@ export interface ReceiptPdfData {
 
 // Render a payment receipt PDF and return the absolute path. One receipt per
 // PayoutPayment; regenerated on demand (nothing is stored on the record).
-export function generateReceiptPdf(data: ReceiptPdfData): Promise<string> {
-  const dir = path.resolve(env.GENERATED_DIR);
-  fs.mkdirSync(dir, { recursive: true });
-  const filePath = path.join(dir, `${data.receiptNumber.replace(/[\\/]/g, '_')}.pdf`);
-
-  return new Promise((resolve, reject) => {
-    const doc = new PDFDocument({ size: 'A4', margin: 50 });
-    const stream = fs.createWriteStream(filePath);
-    doc.pipe(stream);
-    stream.on('finish', () => resolve(filePath));
-    stream.on('error', reject);
+export function generateReceiptPdf(data: ReceiptPdfData): Promise<Buffer> {
+  const doc = new PDFDocument({ size: 'A4', margin: 50 });
+  const done = docToBuffer(doc);
 
     // ── Header ────────────────────────────────────────────────────────────
     doc.fontSize(20).font('Helvetica-Bold').text('GAZON');
@@ -218,8 +209,8 @@ export function generateReceiptPdf(data: ReceiptPdfData): Promise<string> {
       { align: 'center', width: 495 },
     );
 
-    doc.end();
-  });
+  doc.end();
+  return done;
 }
 
 export interface LedgerPdfData {
@@ -245,19 +236,10 @@ export interface LedgerPdfData {
 
 // Render a vendor payout ledger PDF: payout info, receipt summary, ledger
 // transactions, financial summary. Returns the absolute path.
-export function generateLedgerPdf(data: LedgerPdfData): Promise<string> {
-  const dir = path.resolve(env.GENERATED_DIR);
-  fs.mkdirSync(dir, { recursive: true });
-  const safe = data.vendor.name.replace(/[^\w]+/g, '_');
-  const filePath = path.join(dir, `Ledger_${safe}_${Date.now()}.pdf`);
+export function generateLedgerPdf(data: LedgerPdfData): Promise<Buffer> {
   const d = (dt: Date) => dt.toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' });
-
-  return new Promise((resolve, reject) => {
-    const doc = new PDFDocument({ size: 'A4', margin: 50 });
-    const stream = fs.createWriteStream(filePath);
-    doc.pipe(stream);
-    stream.on('finish', () => resolve(filePath));
-    stream.on('error', reject);
+  const doc = new PDFDocument({ size: 'A4', margin: 50 });
+  const done = docToBuffer(doc);
 
     // ── Header ──────────────────────────────────────────────────────────────
     doc.fontSize(20).font('Helvetica-Bold').text('GAZON');
@@ -369,6 +351,6 @@ export function generateLedgerPdf(data: LedgerPdfData): Promise<string> {
       { align: 'center', width: 495 },
     );
 
-    doc.end();
-  });
+  doc.end();
+  return done;
 }

@@ -1,10 +1,9 @@
-import fs from 'node:fs';
-import path from 'node:path';
 import type { PayoutStatus } from '@prisma/client';
 import { prisma } from '../../lib/prisma.js';
 import { ApiError } from '../../utils/ApiError.js';
 import { writeAudit } from '../../lib/audit.js';
 import { pageMeta } from '../../utils/apiResponse.js';
+import { storage } from '../../lib/storage.js';
 import { generateReceiptPdf, generateLedgerPdf } from '../../lib/pdf.js';
 import type { RecordPaymentInput } from './payout.schema.js';
 
@@ -290,11 +289,7 @@ export async function updatePayment(
 
   // Remove the old attachment if a new one replaces it.
   if (attachmentPath !== undefined && payment.attachmentPath) {
-    try {
-      fs.unlinkSync(path.resolve(payment.attachmentPath));
-    } catch {
-      /* ignore */
-    }
+    await storage.delete(payment.attachmentPath);
   }
 
   const newPaid = otherPaid + input.paidAmount;
@@ -338,13 +333,7 @@ export async function deletePayment(paymentId: string, actorId: string) {
   });
   if (!payment) throw ApiError.notFound('Payment not found');
 
-  if (payment.attachmentPath) {
-    try {
-      fs.unlinkSync(path.resolve(payment.attachmentPath));
-    } catch {
-      /* ignore missing file */
-    }
-  }
+  if (payment.attachmentPath) await storage.delete(payment.attachmentPath);
 
   const newPaid = Math.max(0, toNum(payment.calculation.paidAmount) - toNum(payment.paidAmount));
   await prisma.$transaction([
@@ -370,9 +359,10 @@ export async function deletePayment(paymentId: string, actorId: string) {
 export async function getPaymentAttachment(paymentId: string) {
   const payment = await prisma.payoutPayment.findUnique({ where: { id: paymentId } });
   if (!payment || !payment.attachmentPath) throw ApiError.notFound('Attachment not available');
-  const abs = path.resolve(payment.attachmentPath);
-  if (!fs.existsSync(abs)) throw ApiError.notFound('Attachment file missing');
-  return { filePath: abs, fileName: path.basename(abs) };
+  const { stream, contentLength } = await storage.getStream(payment.attachmentPath);
+  // The key ends in "…__<originalName>"; recover a friendly filename.
+  const fileName = payment.attachmentPath.split('__').slice(1).join('__') || 'attachment';
+  return { stream, contentLength, fileName };
 }
 
 // ---------------------------------------------------------------------------
@@ -526,7 +516,7 @@ export async function generatePaymentReceipt(paymentId: string) {
     payment.receiptNumber ??
     `RCPT-${payment.createdAt.toISOString().slice(0, 7).replace('-', '')}-${payment.id.slice(-6).toUpperCase()}`;
 
-  const filePath = await generateReceiptPdf({
+  const buffer = await generateReceiptPdf({
     receiptNumber,
     paymentDate: payment.paymentDate,
     paymentMode: payment.paymentMode,
@@ -548,13 +538,13 @@ export async function generatePaymentReceipt(paymentId: string) {
     },
   });
 
-  return { filePath, receiptNumber };
+  return { buffer, receiptNumber };
 }
 
 // Full vendor ledger PDF: payout info, receipt summary, ledger transactions, totals.
 export async function generateVendorLedgerPdf(vendorId: string) {
   const data = await getVendorLedger(vendorId);
-  const filePath = await generateLedgerPdf({
+  const buffer = await generateLedgerPdf({
     vendor: {
       name: data.vendor.vendorName,
       companyName: data.vendor.companyName,
@@ -580,7 +570,7 @@ export async function generateVendorLedgerPdf(vendorId: string) {
     })),
   });
   const safe = data.vendor.vendorName.replace(/[^\w]+/g, '_');
-  return { filePath, fileName: `Ledger_${safe}.pdf` };
+  return { buffer, fileName: `Ledger_${safe}.pdf` };
 }
 
 // ---------------------------------------------------------------------------

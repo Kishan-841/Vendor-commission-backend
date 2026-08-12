@@ -21,7 +21,7 @@ export const excelUpload = multer({
   },
 });
 
-// Receipt attachments: images or PDF, kept in memory then written to UPLOAD_DIR.
+// Receipt attachments: images or PDF, kept in memory then handed to storage.
 // The extension MUST be in the allowlist — we do not trust the client-supplied
 // MIME type (e.g. application/octet-stream), which would let an .html/.svg
 // through and enable stored XSS when the file is later served.

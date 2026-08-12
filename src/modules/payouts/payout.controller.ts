@@ -1,10 +1,9 @@
-import fs from 'node:fs';
-import path from 'node:path';
 import type { Request, Response } from 'express';
 import type { PayoutStatus } from '@prisma/client';
 import { asyncHandler } from '../../utils/asyncHandler.js';
 import { ok } from '../../utils/apiResponse.js';
-import { env } from '../../config/env.js';
+import { sendDownload } from '../../utils/sendDownload.js';
+import { storage, contentTypeFor, safeFilePart } from '../../lib/storage.js';
 import {
   listVendorPayouts,
   listPayoutMonths,
@@ -19,14 +18,11 @@ import {
   exportPayoutsCsv,
 } from './payout.service.js';
 
-// Persist an uploaded receipt attachment to UPLOAD_DIR/receipts and return its path.
-function saveAttachment(file: Express.Multer.File): string {
-  const dir = path.resolve(env.UPLOAD_DIR, 'receipts');
-  fs.mkdirSync(dir, { recursive: true });
-  const safe = file.originalname.replace(/[^\w.\- ]/g, '_');
-  const filePath = path.join(dir, `${Date.now()}__${safe}`);
-  fs.writeFileSync(filePath, file.buffer);
-  return filePath;
+// Persist an uploaded receipt attachment to object storage; returns its key.
+async function saveAttachment(file: Express.Multer.File): Promise<string> {
+  const key = `receipts/${Date.now()}__${safeFilePart(file.originalname)}`;
+  await storage.put(key, file.buffer, contentTypeFor(file.originalname));
+  return key;
 }
 
 export const listVendorPayoutsHandler = asyncHandler(async (req: Request, res: Response) => {
@@ -54,14 +50,14 @@ export const vendorLedgerHandler = asyncHandler(async (req: Request, res: Respon
 });
 
 export const recordPaymentHandler = asyncHandler(async (req: Request, res: Response) => {
-  const file = req.file ? saveAttachment(req.file) : null;
+  const file = req.file ? await saveAttachment(req.file) : null;
   const result = await recordPayment(req.params.id, req.body, req.user!.id, file);
   return ok(res, result, 201);
 });
 
 export const updatePaymentHandler = asyncHandler(async (req: Request, res: Response) => {
   // Only replace the attachment when a new file is uploaded (undefined = keep).
-  const attachment = req.file ? saveAttachment(req.file) : undefined;
+  const attachment = req.file ? await saveAttachment(req.file) : undefined;
   const result = await updatePayment(req.params.id, req.body, req.user!.id, attachment);
   return ok(res, result);
 });
@@ -72,28 +68,20 @@ export const deletePaymentHandler = asyncHandler(async (req: Request, res: Respo
 });
 
 export const paymentAttachmentHandler = asyncHandler(async (req: Request, res: Response) => {
-  const { filePath, fileName } = await getPaymentAttachment(req.params.id);
-  // Serve user-uploaded files as a download with a neutral type + no sniffing,
-  // so a malicious upload can never be rendered (stored XSS) by the browser.
-  const safeName = fileName.replace(/[^\w.\- ]/g, '_');
-  res.setHeader('Content-Disposition', `attachment; filename="${safeName}"`);
-  res.setHeader('Content-Type', 'application/octet-stream');
-  res.setHeader('X-Content-Type-Options', 'nosniff');
-  res.sendFile(path.resolve(filePath));
+  const { stream, contentLength, fileName } = await getPaymentAttachment(req.params.id);
+  // User-uploaded file → neutral type + no sniffing so it can never be rendered
+  // (stored XSS) by the browser; always a download.
+  sendDownload(res, stream, { fileName, contentType: 'application/octet-stream', contentLength });
 });
 
 export const paymentReceiptHandler = asyncHandler(async (req: Request, res: Response) => {
-  const { filePath, receiptNumber } = await generatePaymentReceipt(req.params.id);
-  res.setHeader('Content-Type', 'application/pdf');
-  res.setHeader('Content-Disposition', `attachment; filename="${receiptNumber}.pdf"`);
-  res.sendFile(path.resolve(filePath));
+  const { buffer, receiptNumber } = await generatePaymentReceipt(req.params.id);
+  sendDownload(res, buffer, { fileName: `${receiptNumber}.pdf`, contentType: 'application/pdf' });
 });
 
 export const vendorLedgerPdfHandler = asyncHandler(async (req: Request, res: Response) => {
-  const { filePath, fileName } = await generateVendorLedgerPdf(req.params.vendorId);
-  res.setHeader('Content-Type', 'application/pdf');
-  res.setHeader('Content-Disposition', `attachment; filename="${fileName}"`);
-  res.sendFile(path.resolve(filePath));
+  const { buffer, fileName } = await generateVendorLedgerPdf(req.params.vendorId);
+  sendDownload(res, buffer, { fileName, contentType: 'application/pdf' });
 });
 
 export const exportPayoutsHandler = asyncHandler(async (_req: Request, res: Response) => {

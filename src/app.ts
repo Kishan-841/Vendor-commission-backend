@@ -31,8 +31,8 @@ export function createApp() {
   app.use(express.urlencoded({ extended: true }));
   if (!isProd) app.use(morgan('dev'));
 
-  // Serve generated bill PDFs (static) — download links point here.
-  app.use('/files/generated', express.static(env.GENERATED_DIR));
+  // Files are stored in object storage (R2 / local) and streamed through the
+  // authenticated download endpoints — no public static directory.
 
   app.get('/health', (_req, res) => res.json({ success: true, data: { status: 'ok' } }));
 

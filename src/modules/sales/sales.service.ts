@@ -1,10 +1,8 @@
-import fs from 'node:fs';
-import path from 'node:path';
 import { Prisma, type ZoneType } from '@prisma/client';
 import { prisma } from '../../lib/prisma.js';
-import { env } from '../../config/env.js';
 import { ApiError } from '../../utils/ApiError.js';
 import { writeAudit } from '../../lib/audit.js';
+import { storage, contentTypeFor, safeFilePart } from '../../lib/storage.js';
 import { getNumberSetting, DEFAULT_GST_KEY } from '../../lib/settings.js';
 import {
   parseFirstSheet,
@@ -169,14 +167,12 @@ export interface UploadResult {
 
 const typeLabel = (t: ZoneType) => (t === 'NEW' ? 'New' : 'Renewal');
 
-// Persist the original file to UPLOAD_DIR so it can be downloaded later.
-function persistOriginal(month: string, file: Express.Multer.File): string {
-  const dir = path.resolve(env.UPLOAD_DIR);
-  fs.mkdirSync(dir, { recursive: true });
-  const safeName = file.originalname.replace(/[^\w.\- ]/g, '_');
-  const filePath = path.join(dir, `${month}__${Date.now()}__${safeName}`);
-  fs.writeFileSync(filePath, file.buffer);
-  return filePath;
+// Persist the original file to object storage so it can be downloaded later.
+// Returns the storage key (saved in SalesUpload.filePath).
+async function persistOriginal(month: string, file: Express.Multer.File): Promise<string> {
+  const key = `sales/${month}/${Date.now()}__${safeFilePart(file.originalname)}`;
+  await storage.put(key, file.buffer, contentTypeFor(file.originalname));
+  return key;
 }
 
 export async function uploadSalesSheet(
@@ -212,17 +208,11 @@ export async function uploadSalesSheet(
     }
     version = existing.version + 1;
     // Remove the previous file + rows (rows cascade on delete).
-    if (existing.filePath) {
-      try {
-        fs.unlinkSync(path.resolve(existing.filePath));
-      } catch {
-        /* file may already be gone — ignore */
-      }
-    }
+    if (existing.filePath) await storage.delete(existing.filePath);
     await prisma.salesUpload.delete({ where: { id: existing.id } });
   }
 
-  const filePath = persistOriginal(month, file);
+  const filePath = await persistOriginal(month, file);
   const upload = await prisma.salesUpload.create({
     data: {
       month,
@@ -317,13 +307,7 @@ export async function setSalesUploadLock(id: string, locked: boolean, actorId: s
 export async function deleteSalesUpload(id: string, actorId: string) {
   const upload = await prisma.salesUpload.findUnique({ where: { id } });
   if (!upload) throw ApiError.notFound('Sales upload not found');
-  if (upload.filePath) {
-    try {
-      fs.unlinkSync(path.resolve(upload.filePath));
-    } catch {
-      /* ignore missing file */
-    }
-  }
+  if (upload.filePath) await storage.delete(upload.filePath);
   await prisma.salesUpload.delete({ where: { id } }); // rows cascade
   await writeAudit({
     userId: actorId,
@@ -334,12 +318,12 @@ export async function deleteSalesUpload(id: string, actorId: string) {
   });
 }
 
+// Returns a readable stream of the original file (from object storage).
 export async function getSalesUploadFile(id: string) {
   const upload = await prisma.salesUpload.findUnique({ where: { id } });
   if (!upload || !upload.filePath) throw ApiError.notFound('Original file not available');
-  const abs = path.resolve(upload.filePath);
-  if (!fs.existsSync(abs)) throw ApiError.notFound('Original file not available');
-  return { filePath: abs, fileName: upload.fileName };
+  const { stream, contentLength } = await storage.getStream(upload.filePath);
+  return { stream, contentLength, fileName: upload.fileName };
 }
 
 // ---------------------------------------------------------------------------

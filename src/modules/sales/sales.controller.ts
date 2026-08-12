@@ -1,8 +1,9 @@
-import path from 'node:path';
 import type { Request, Response } from 'express';
 import { asyncHandler } from '../../utils/asyncHandler.js';
 import { ok } from '../../utils/apiResponse.js';
 import { ApiError } from '../../utils/ApiError.js';
+import { sendDownload } from '../../utils/sendDownload.js';
+import { contentTypeFor } from '../../lib/storage.js';
 import { buildVendorMonthWorkbook } from './sales.export.js';
 import {
   uploadSalesSheet,
@@ -60,9 +61,8 @@ export const deleteUploadHandler = asyncHandler(async (req: Request, res: Respon
 });
 
 export const downloadUploadHandler = asyncHandler(async (req: Request, res: Response) => {
-  const { filePath, fileName } = await getSalesUploadFile(req.params.id);
-  res.setHeader('Content-Disposition', `attachment; filename="${fileName.replace(/[^\w.\- ]/g, '_')}"`);
-  res.sendFile(path.resolve(filePath));
+  const { stream, contentLength, fileName } = await getSalesUploadFile(req.params.id);
+  sendDownload(res, stream, { fileName, contentType: contentTypeFor(fileName), contentLength });
 });
 
 // ── Tab 2: Calculations from a stored sheet ────────────────────────────────
