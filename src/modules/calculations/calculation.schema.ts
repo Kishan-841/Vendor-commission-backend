@@ -29,6 +29,7 @@ export const listCalculationsQuerySchema = z.object({
   vendorId: z.string().optional(),
   status: z.enum(['DRAFT', 'SUBMITTED', 'APPROVED', 'REJECTED']).optional(),
   month: z.string().regex(/^\d{4}-\d{2}$/).optional(),
+  search: z.string().trim().optional(),
 });
 
 export const idParamSchema = z.object({ id: z.string().min(1) });

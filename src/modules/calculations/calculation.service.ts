@@ -212,11 +212,24 @@ export async function updateCalculation(
 }
 
 export async function listCalculations(query: ListCalculationsQuery) {
-  const { page, pageSize, vendorId, status, month } = query;
+  const { page, pageSize, vendorId, status, month, search } = query;
   const where: Prisma.CommissionCalculationWhereInput = {
     ...(vendorId ? { vendorId } : {}),
     ...(status ? { status } : {}),
     ...(month ? { month } : {}),
+    // Search matches the vendor's name or company name.
+    ...(search
+      ? {
+          vendor: {
+            is: {
+              OR: [
+                { vendorName: { contains: search, mode: 'insensitive' } },
+                { companyName: { contains: search, mode: 'insensitive' } },
+              ],
+            },
+          },
+        }
+      : {}),
   };
 
   const [items, total] = await Promise.all([
