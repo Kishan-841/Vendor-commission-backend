@@ -18,6 +18,16 @@ export const rejectHandler = asyncHandler(async (req: Request, res: Response) =>
   return ok(res, calc);
 });
 
+export const bulkSubmitHandler = asyncHandler(async (req: Request, res: Response) => {
+  const result = await approvalService.bulkSubmitCalculations(req.body.ids, req.user!.id);
+  return ok(res, result);
+});
+
+export const bulkApproveHandler = asyncHandler(async (req: Request, res: Response) => {
+  const result = await approvalService.bulkApproveCalculations(req.body.ids, req.user!.id);
+  return ok(res, result);
+});
+
 export const historyHandler = asyncHandler(async (req: Request, res: Response) => {
   const history = await approvalService.getApprovalHistory(req.params.id);
   return ok(res, history);

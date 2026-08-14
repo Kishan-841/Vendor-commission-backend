@@ -59,6 +59,59 @@ export function rejectCalculation(id: string, actorId: string, remarks: string) 
   return transition(id, 'REJECTED', 'REJECTED', actorId, remarks);
 }
 
+// Bulk transition: moves every id whose current status allows it, skips the
+// rest (same skip-don't-fail contract as bulk delete). Status update + one
+// Approval audit row per calculation land in a single transaction.
+async function bulkTransition(
+  ids: string[],
+  to: CalculationStatus,
+  action: 'SUBMITTED' | 'APPROVED',
+  actorId: string,
+) {
+  const found = await prisma.commissionCalculation.findMany({
+    where: { id: { in: ids } },
+    select: { id: true, status: true },
+  });
+  const eligibleIds = found
+    .filter((c) => (TRANSITIONS[c.status] ?? []).includes(to))
+    .map((c) => c.id);
+  const eligibleSet = new Set(eligibleIds);
+  const skippedIds = ids.filter((id) => !eligibleSet.has(id));
+
+  if (eligibleIds.length > 0) {
+    await prisma.$transaction([
+      prisma.commissionCalculation.updateMany({
+        where: { id: { in: eligibleIds } },
+        data: { status: to },
+      }),
+      prisma.approval.createMany({
+        data: eligibleIds.map((calculationId) => ({
+          calculationId,
+          action,
+          actorId,
+          remarks: null,
+        })),
+      }),
+    ]);
+    await writeAudit({
+      userId: actorId,
+      action: `CALCULATIONS_BULK_${action}`,
+      entityType: 'CommissionCalculation',
+      metadata: { ids: eligibleIds, skippedIds },
+    });
+  }
+
+  return { updatedCount: eligibleIds.length, skippedIds };
+}
+
+export function bulkSubmitCalculations(ids: string[], actorId: string) {
+  return bulkTransition(ids, 'SUBMITTED', 'SUBMITTED', actorId);
+}
+
+export function bulkApproveCalculations(ids: string[], actorId: string) {
+  return bulkTransition(ids, 'APPROVED', 'APPROVED', actorId);
+}
+
 export async function getApprovalHistory(calculationId: string) {
   const calc = await prisma.commissionCalculation.findUnique({ where: { id: calculationId } });
   if (!calc) throw ApiError.notFound('Calculation not found');

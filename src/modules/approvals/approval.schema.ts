@@ -10,3 +10,8 @@ export const remarksOptionalSchema = z.object({
 export const rejectSchema = z.object({
   remarks: z.string().trim().min(1, 'A reason is required when rejecting'),
 });
+
+// Bulk submit/approve take a list of calculation ids.
+export const bulkIdsSchema = z.object({
+  ids: z.array(z.string().min(1)).min(1, 'Select at least one calculation').max(100),
+});
