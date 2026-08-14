@@ -223,7 +223,7 @@ export async function listCalculations(query: ListCalculationsQuery) {
     prisma.commissionCalculation.findMany({
       where,
       include: {
-        vendor: { select: { id: true, vendorName: true } },
+        vendor: { select: { id: true, vendorName: true, companyName: true } },
         _count: { select: { breakdowns: true } },
       },
       orderBy: { createdAt: 'desc' },
