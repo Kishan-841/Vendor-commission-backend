@@ -17,6 +17,10 @@
 //
 // Fixed Vendor Pay joins the base BEFORE taxes: GST and TDS are computed on
 // (gross commission + fixed pay), so Final = (gross + fixed) + GST - TDS.
+//
+// The final payable is rounded off to the nearest whole rupee (invoice
+// practice); component amounts stay paise-precise, so the round-off is always
+// derivable as final - (gross + fixedPay + gst - tds).
 // ─────────────────────────────────────────────────────────────────────────
 
 export interface ZoneCommissionInput {
@@ -53,7 +57,7 @@ export interface CommissionResult {
   gstAmount: number;
   tdsAmount: number;
   fixedPayAmount: number; // 0 unless the vendor has Fixed Vendor Pay enabled
-  finalPayable: number; // (gross + fixedPay) + gst - tds (taxes on gross + fixedPay)
+  finalPayable: number; // (gross + fixedPay) + gst - tds, rounded to the nearest rupee
 }
 
 // Round to 2 decimals (paise). Uses a tiny epsilon nudge so values like
@@ -120,7 +124,8 @@ export function computeCommissionFromZoneSales(
   const taxBase = round2(grossCommission + fixedPayAmount);
   const gstAmount = pct(taxBase, input.gstPercentage);
   const tdsAmount = pct(taxBase, input.tdsPercentage);
-  const finalPayable = round2(taxBase + gstAmount - tdsAmount);
+  // Round off to the nearest whole rupee (components stay paise-precise).
+  const finalPayable = Math.round(taxBase + gstAmount - tdsAmount);
 
   return {
     totalSales,
@@ -163,7 +168,8 @@ export function computeCommission(input: CommissionInput): CommissionResult {
   const taxBase = round2(grossCommission + fixedPayAmount);
   const gstAmount = pct(taxBase, input.gstPercentage);
   const tdsAmount = pct(taxBase, input.tdsPercentage);
-  const finalPayable = round2(taxBase + gstAmount - tdsAmount);
+  // Round off to the nearest whole rupee (components stay paise-precise).
+  const finalPayable = Math.round(taxBase + gstAmount - tdsAmount);
 
   return {
     agrAmount,

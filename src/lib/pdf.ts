@@ -114,11 +114,20 @@ export function generateBillPdf(data: BillPdfData): Promise<Buffer> {
     };
     summaryRow('Gross Commission', inr(data.grossCommission));
     // Fixed pay joins the base before taxes (GST/TDS apply to gross + fixed).
-    if (data.fixedPayAmount && data.fixedPayAmount > 0) {
-      summaryRow('Fixed Pay', '+ ' + inr(data.fixedPayAmount));
+    // Negative fixed pay is a deduction and must still appear.
+    const fixedPay = data.fixedPayAmount ?? 0;
+    if (fixedPay !== 0) {
+      summaryRow('Fixed Pay', (fixedPay > 0 ? '+ ' : '- ') + inr(Math.abs(fixedPay)));
     }
     summaryRow('GST', '+ ' + inr(data.gstAmount));
     summaryRow('TDS', '- ' + inr(data.tdsAmount));
+    // Final payable is rounded to the whole rupee; show the adjustment so the
+    // summary lines add up exactly to the final figure.
+    const roundOff =
+      Math.round((data.finalPayable - (data.grossCommission + fixedPay + data.gstAmount - data.tdsAmount)) * 100) / 100;
+    if (roundOff !== 0) {
+      summaryRow('Round Off', (roundOff > 0 ? '+ ' : '- ') + inr(Math.abs(roundOff)));
+    }
     doc.moveDown(0.2);
     doc.moveTo(300, doc.y).lineTo(545, doc.y).strokeColor('#888').stroke();
     doc.moveDown(0.4);
