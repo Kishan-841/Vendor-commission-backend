@@ -30,9 +30,10 @@ export const createVendorSchema = z
     agrApplicable: z.boolean().default(false),
     agrPercentage: percentage.default(0),
     tdsPercentage: percentage.default(0),
-    // Fixed Vendor Pay: flat amount added on top of the performance pay.
+    // Fixed Vendor Pay: flat amount added to (positive) or deducted from
+    // (negative) the performance pay before taxes.
     fixedPayEnabled: z.boolean().default(false),
-    fixedPayAmount: z.coerce.number().min(0).nullable().optional(),
+    fixedPayAmount: z.coerce.number().nullable().optional(),
     status: z.enum(['ACTIVE', 'INACTIVE']).default('ACTIVE'),
     bankDetails: bankDetailSchema.optional(),
     // Zone assignments (each: zone + type + commission %).
@@ -43,8 +44,9 @@ export const createVendorSchema = z
     message: 'AGR percentage must be greater than 0 when AGR is applicable',
     path: ['agrPercentage'],
   })
-  // Fixed pay amount is required (> 0) when Fixed Vendor Pay is enabled.
-  .refine((v) => !v.fixedPayEnabled || (v.fixedPayAmount != null && v.fixedPayAmount > 0), {
+  // Fixed pay amount is required (non-zero, may be negative) when enabled —
+  // a zero amount means the toggle should just be off.
+  .refine((v) => !v.fixedPayEnabled || (v.fixedPayAmount != null && v.fixedPayAmount !== 0), {
     message: 'Fixed pay amount is required when Fixed Vendor Pay is enabled',
     path: ['fixedPayAmount'],
   });
@@ -64,13 +66,13 @@ export const updateVendorSchema = z
     agrPercentage: percentage.optional(),
     tdsPercentage: percentage.optional(),
     fixedPayEnabled: z.boolean().optional(),
-    fixedPayAmount: z.coerce.number().min(0).nullable().optional(),
+    fixedPayAmount: z.coerce.number().nullable().optional(),
     status: z.enum(['ACTIVE', 'INACTIVE']).optional(),
     bankDetails: bankDetailSchema.optional(),
     // When provided, REPLACES the vendor's full set of zone assignments.
     zoneAssignments: z.array(zoneAssignmentSchema).optional(),
   })
-  .refine((v) => v.fixedPayEnabled !== true || (v.fixedPayAmount != null && v.fixedPayAmount > 0), {
+  .refine((v) => v.fixedPayEnabled !== true || (v.fixedPayAmount != null && v.fixedPayAmount !== 0), {
     message: 'Fixed pay amount is required when Fixed Vendor Pay is enabled',
     path: ['fixedPayAmount'],
   })
