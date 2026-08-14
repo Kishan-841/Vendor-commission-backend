@@ -242,11 +242,20 @@ export async function getCalculation(id: string) {
   return calc;
 }
 
+// Deletable = not yet in (or bounced out of) the approval workflow.
+// SUBMITTED/APPROVED are locked: approved calcs may have bills/payouts linked
+// and form the audit trail.
+const DELETABLE_STATUSES = ['DRAFT', 'REJECTED'] as const;
+type DeletableStatus = (typeof DELETABLE_STATUSES)[number];
+
+const isDeletable = (status: string): status is DeletableStatus =>
+  (DELETABLE_STATUSES as readonly string[]).includes(status);
+
 export async function deleteCalculation(id: string, actorId: string) {
   const existing = await prisma.commissionCalculation.findUnique({ where: { id } });
   if (!existing) throw ApiError.notFound('Calculation not found');
-  if (existing.status !== 'DRAFT') {
-    throw ApiError.conflict('Only DRAFT calculations can be deleted');
+  if (!isDeletable(existing.status)) {
+    throw ApiError.conflict('Only DRAFT or REJECTED calculations can be deleted');
   }
   await prisma.commissionCalculation.delete({ where: { id } });
   await writeAudit({
@@ -256,4 +265,29 @@ export async function deleteCalculation(id: string, actorId: string) {
     entityId: id,
   });
   return { id };
+}
+
+// Best-effort bulk delete: rows that are locked (SUBMITTED/APPROVED) or already
+// gone are skipped and reported, not fatal — the client's table is a snapshot
+// and a row's status can change between render and delete.
+export async function bulkDeleteCalculations(ids: string[], actorId: string) {
+  const found = await prisma.commissionCalculation.findMany({
+    where: { id: { in: ids } },
+    select: { id: true, status: true },
+  });
+  const deletableIds = found.filter((c) => isDeletable(c.status)).map((c) => c.id);
+  const deletableSet = new Set(deletableIds);
+  const skippedIds = ids.filter((id) => !deletableSet.has(id));
+
+  if (deletableIds.length > 0) {
+    await prisma.commissionCalculation.deleteMany({ where: { id: { in: deletableIds } } });
+    await writeAudit({
+      userId: actorId,
+      action: 'CALCULATIONS_BULK_DELETED',
+      entityType: 'CommissionCalculation',
+      metadata: { deletedIds: deletableIds, skippedIds },
+    });
+  }
+
+  return { deletedCount: deletableIds.length, skippedIds };
 }

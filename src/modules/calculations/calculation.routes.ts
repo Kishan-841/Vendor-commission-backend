@@ -2,12 +2,14 @@ import { Router } from 'express';
 import { authenticate, requireRole } from '../../middleware/auth.js';
 import { validate } from '../../middleware/validate.js';
 import {
+  bulkDeleteCalculationsSchema,
   createCalculationSchema,
   idParamSchema,
   listCalculationsQuerySchema,
   updateCalculationSchema,
 } from './calculation.schema.js';
 import {
+  bulkDeleteCalculationsHandler,
   createCalculationHandler,
   deleteCalculationHandler,
   getCalculationHandler,
@@ -29,6 +31,12 @@ calculationRouter.post(
   requireRole('ADMIN'),
   validate({ body: createCalculationSchema }),
   createCalculationHandler,
+);
+calculationRouter.post(
+  '/bulk-delete',
+  requireRole('ADMIN'),
+  validate({ body: bulkDeleteCalculationsSchema }),
+  bulkDeleteCalculationsHandler,
 );
 calculationRouter.patch(
   '/:id',

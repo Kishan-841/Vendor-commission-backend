@@ -33,6 +33,11 @@ export const listCalculationsQuerySchema = z.object({
 
 export const idParamSchema = z.object({ id: z.string().min(1) });
 
+export const bulkDeleteCalculationsSchema = z.object({
+  ids: z.array(z.string().min(1)).min(1, 'Select at least one calculation').max(100),
+});
+
 export type CreateCalculationInput = z.infer<typeof createCalculationSchema>;
+export type BulkDeleteCalculationsInput = z.infer<typeof bulkDeleteCalculationsSchema>;
 export type UpdateCalculationInput = z.infer<typeof updateCalculationSchema>;
 export type ListCalculationsQuery = z.infer<typeof listCalculationsQuerySchema>;

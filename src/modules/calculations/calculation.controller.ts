@@ -27,3 +27,8 @@ export const deleteCalculationHandler = asyncHandler(async (req: Request, res: R
   const result = await calcService.deleteCalculation(req.params.id, req.user!.id);
   return ok(res, result);
 });
+
+export const bulkDeleteCalculationsHandler = asyncHandler(async (req: Request, res: Response) => {
+  const result = await calcService.bulkDeleteCalculations(req.body.ids, req.user!.id);
+  return ok(res, result);
+});
