@@ -14,6 +14,9 @@
 //   GST 18%      ->  +2484
 //   TDS  2%      ->  -276   (on gross commission, not on GST-inclusive amount)
 //   Final        = 13800 + 2484 - 276 = 16008
+//
+// Fixed Vendor Pay joins the base BEFORE taxes: GST and TDS are computed on
+// (gross commission + fixed pay), so Final = (gross + fixed) + GST - TDS.
 // ─────────────────────────────────────────────────────────────────────────
 
 export interface ZoneCommissionInput {
@@ -50,7 +53,7 @@ export interface CommissionResult {
   gstAmount: number;
   tdsAmount: number;
   fixedPayAmount: number; // 0 unless the vendor has Fixed Vendor Pay enabled
-  finalPayable: number; // (gross + gst - tds) + fixedPayAmount
+  finalPayable: number; // (gross + fixedPay) + gst - tds (taxes on gross + fixedPay)
 }
 
 // Round to 2 decimals (paise). Uses a tiny epsilon nudge so values like
@@ -112,10 +115,12 @@ export function computeCommissionFromZoneSales(
   agrAmount = round2(agrAmount);
   salesAfterAgr = round2(salesAfterAgr);
   grossCommission = round2(grossCommission);
-  const gstAmount = pct(grossCommission, input.gstPercentage);
-  const tdsAmount = pct(grossCommission, input.tdsPercentage);
+  // Fixed pay joins the base before taxes: GST/TDS apply to gross + fixed pay.
   const fixedPayAmount = round2(input.fixedPayAmount ?? 0);
-  const finalPayable = round2(grossCommission + gstAmount - tdsAmount + fixedPayAmount);
+  const taxBase = round2(grossCommission + fixedPayAmount);
+  const gstAmount = pct(taxBase, input.gstPercentage);
+  const tdsAmount = pct(taxBase, input.tdsPercentage);
+  const finalPayable = round2(taxBase + gstAmount - tdsAmount);
 
   return {
     totalSales,
@@ -152,13 +157,13 @@ export function computeCommission(input: CommissionInput): CommissionResult {
     breakdowns.reduce((sum, b) => sum + b.commissionAmount, 0),
   );
 
-  // 4. GST is added on top of gross; TDS is deducted from gross.
-  const gstAmount = pct(grossCommission, input.gstPercentage);
-  const tdsAmount = pct(grossCommission, input.tdsPercentage);
-
-  // Performance pay, then add the vendor's fixed pay (if any).
+  // 4. Fixed pay joins the base first; GST is added on top of that base and
+  //    TDS is deducted from it: Final = (gross + fixed) + GST - TDS.
   const fixedPayAmount = round2(input.fixedPayAmount ?? 0);
-  const finalPayable = round2(grossCommission + gstAmount - tdsAmount + fixedPayAmount);
+  const taxBase = round2(grossCommission + fixedPayAmount);
+  const gstAmount = pct(taxBase, input.gstPercentage);
+  const tdsAmount = pct(taxBase, input.tdsPercentage);
+  const finalPayable = round2(taxBase + gstAmount - tdsAmount);
 
   return {
     agrAmount,

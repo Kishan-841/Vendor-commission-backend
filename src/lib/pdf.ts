@@ -113,11 +113,12 @@ export function generateBillPdf(data: BillPdfData): Promise<Buffer> {
       doc.moveDown(bold ? 0.2 : 0.35);
     };
     summaryRow('Gross Commission', inr(data.grossCommission));
-    summaryRow('GST', '+ ' + inr(data.gstAmount));
-    summaryRow('TDS', '- ' + inr(data.tdsAmount));
+    // Fixed pay joins the base before taxes (GST/TDS apply to gross + fixed).
     if (data.fixedPayAmount && data.fixedPayAmount > 0) {
       summaryRow('Fixed Pay', '+ ' + inr(data.fixedPayAmount));
     }
+    summaryRow('GST', '+ ' + inr(data.gstAmount));
+    summaryRow('TDS', '- ' + inr(data.tdsAmount));
     doc.moveDown(0.2);
     doc.moveTo(300, doc.y).lineTo(545, doc.y).strokeColor('#888').stroke();
     doc.moveDown(0.4);
