@@ -9,7 +9,12 @@ import type {
   UpdateVendorInput,
 } from './vendor.schema.js';
 
-const vendorInclude = { bankDetails: true } satisfies Prisma.VendorInclude;
+// List view includes zone assignments so the vendors table can show them
+// (zones dropdown + fixed pay columns) without a per-row detail fetch.
+const vendorInclude = {
+  bankDetails: true,
+  zoneAssignments: { include: { zone: true }, orderBy: [{ zoneType: 'asc' }] },
+} satisfies Prisma.VendorInclude;
 // Detail view also returns the vendor's zone assignments (with the master zone).
 const vendorDetailInclude = {
   bankDetails: true,
