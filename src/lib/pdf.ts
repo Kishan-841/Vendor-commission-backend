@@ -241,6 +241,15 @@ export interface LedgerPdfData {
     debit: number;
     credit: number;
     balance: number;
+    // Commission math behind a Payout Generated line (absent on receipts).
+    breakdown?: {
+      grossCommission: number;
+      fixedPayAmount: number;
+      gstAmount: number;
+      tdsAmount: number;
+      roundOff: number;
+      finalPayable: number;
+    };
   }[];
 }
 
@@ -341,7 +350,7 @@ export function generateLedgerPdf(data: LedgerPdfData): Promise<Buffer> {
       doc.font('Helvetica-Oblique').fontSize(9).fillColor('#888').text('No ledger transactions.', 50);
     } else {
       for (const e of data.ledger) {
-        if (doc.y > 780) doc.addPage();
+        if (doc.y > 770) doc.addPage();
         drawRow([
           { text: d(e.date), x: 50, w: 62 },
           { text: e.transactionType, x: 112, w: 90 },
@@ -350,6 +359,25 @@ export function generateLedgerPdf(data: LedgerPdfData): Promise<Buffer> {
           { text: e.credit ? inr(e.credit) : '-', x: 375, w: 78, align: 'right' },
           { text: inr(e.balance), x: 453, w: 92, align: 'right' },
         ]);
+        // Detailed math under payout lines: commission + fixed + GST − TDS = final.
+        if (e.breakdown) {
+          const b = e.breakdown;
+          const parts = [`Comm ${inr(b.grossCommission)}`];
+          if (b.fixedPayAmount !== 0)
+            parts.push(`${b.fixedPayAmount > 0 ? '+' : '-'} Fixed ${inr(Math.abs(b.fixedPayAmount))}`);
+          if (b.gstAmount !== 0) parts.push(`+ GST ${inr(b.gstAmount)}`);
+          if (b.tdsAmount !== 0) parts.push(`- TDS ${inr(b.tdsAmount)}`);
+          if (b.roundOff !== 0)
+            parts.push(`${b.roundOff > 0 ? '+' : '-'} R/O ${inr(Math.abs(b.roundOff))}`);
+          parts.push(`= ${inr(b.finalPayable)}`);
+          doc
+            .font('Helvetica')
+            .fontSize(8)
+            .fillColor('#777')
+            .text(parts.join(' '), 112, doc.y, { width: 433 });
+          doc.fillColor('#000');
+          doc.moveDown(0.35);
+        }
       }
     }
 

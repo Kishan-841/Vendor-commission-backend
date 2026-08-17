@@ -379,6 +379,16 @@ export async function getPaymentAttachment(paymentId: string) {
 // Vendor ledger: payout-generated debits + receipt credits, running balance
 // ---------------------------------------------------------------------------
 
+// Commission math behind a Payout Generated line, from the calc snapshot.
+export interface LedgerBreakdown {
+  grossCommission: number;
+  fixedPayAmount: number;
+  gstAmount: number;
+  tdsAmount: number;
+  roundOff: number;
+  finalPayable: number;
+}
+
 export interface LedgerEntry {
   date: string;
   transactionType: 'Payout Generated' | 'Receipt';
@@ -387,6 +397,7 @@ export interface LedgerEntry {
   debit: number;
   credit: number;
   balance: number;
+  breakdown?: LedgerBreakdown; // present on Payout Generated entries
 }
 
 export async function getVendorLedger(vendorId: string) {
@@ -451,13 +462,26 @@ export async function getVendorLedger(vendorId: string) {
   const raw: Raw[] = [];
   for (const c of calculations) {
     const genDate = c.approvals[0]?.createdAt ?? c.updatedAt;
+    const gross = toNum(c.grossCommission);
+    const fixedPay = toNum(c.fixedPayAmount);
+    const gst = toNum(c.gstAmount);
+    const tds = toNum(c.tdsAmount);
+    const final = toNum(c.finalPayable);
     raw.push({
       date: genDate.toISOString(),
       transactionType: 'Payout Generated',
       reference: c.bill?.billNumber ?? c.month,
       description: `${monthLabel(c.month)} commission`,
-      debit: toNum(c.finalPayable),
+      debit: final,
       credit: 0,
+      breakdown: {
+        grossCommission: gross,
+        fixedPayAmount: fixedPay,
+        gstAmount: gst,
+        tdsAmount: tds,
+        roundOff: Math.round((final - (gross + fixedPay + gst - tds)) * 100) / 100,
+        finalPayable: final,
+      },
       sortKey: genDate.getTime(),
     });
     for (const p of c.payments) {
@@ -577,6 +601,7 @@ export async function generateVendorLedgerPdf(vendorId: string) {
       debit: e.debit,
       credit: e.credit,
       balance: e.balance,
+      breakdown: e.breakdown,
     })),
   });
   const safe = data.vendor.vendorName.replace(/[^\w]+/g, '_');
