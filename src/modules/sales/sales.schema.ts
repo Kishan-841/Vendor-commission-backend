@@ -56,4 +56,15 @@ export const salesListQuerySchema = z.object({
 
 export type SalesListQueryInput = z.infer<typeof salesListQuerySchema>;
 
+// Grouped summary: same filters as the list, minus pagination/sort (all
+// zone+type groups for the month are returned in one response).
+export const salesGroupedQuerySchema = z.object({
+  month: monthSchema,
+  search: z.string().trim().max(200).optional(),
+  salesType: z.enum(['NEW', 'RENEWAL']).optional(),
+  zone: z.string().optional(),
+});
+
+export type SalesGroupedQueryInput = z.infer<typeof salesGroupedQuerySchema>;
+
 export const salesFiltersQuerySchema = z.object({ month: monthSchema });

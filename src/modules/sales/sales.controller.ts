@@ -16,9 +16,11 @@ import {
   generateSelectedVendors,
   generateAllForMonth,
   listSales,
+  listSalesGrouped,
   listSalesMonths,
   getSalesFilterOptions,
   type SalesListQuery,
+  type SalesGroupedQuery,
 } from './sales.service.js';
 import type { SalesListQueryInput } from './sales.schema.js';
 
@@ -96,6 +98,11 @@ export const listMonthsHandler = asyncHandler(async (_req: Request, res: Respons
 export const listSalesHandler = asyncHandler(async (req: Request, res: Response) => {
   const query = req.query as unknown as SalesListQueryInput;
   return ok(res, await listSales(query as SalesListQuery));
+});
+
+export const listSalesGroupedHandler = asyncHandler(async (req: Request, res: Response) => {
+  const query = req.query as unknown as SalesGroupedQuery;
+  return ok(res, await listSalesGrouped(query));
 });
 
 export const filterOptionsHandler = asyncHandler(async (req: Request, res: Response) => {

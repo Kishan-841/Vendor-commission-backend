@@ -11,6 +11,7 @@ import {
   monthQuerySchema,
   exportQuerySchema,
   salesListQuerySchema,
+  salesGroupedQuerySchema,
   salesFiltersQuerySchema,
 } from './sales.schema.js';
 import {
@@ -26,6 +27,7 @@ import {
   generateAllHandler,
   listMonthsHandler,
   listSalesHandler,
+  listSalesGroupedHandler,
   filterOptionsHandler,
   exportWorkbookHandler,
 } from './sales.controller.js';
@@ -90,4 +92,6 @@ salesSummaryRouter.get('/months', listMonthsHandler);
 salesSummaryRouter.get('/filters', validate({ query: salesFiltersQuerySchema }), filterOptionsHandler);
 // Vendor + month Excel export (two-sheet workbook).
 salesSummaryRouter.get('/export', validate({ query: exportQuerySchema }), exportWorkbookHandler);
+// Zone+type aggregated view (one entry per group, with count + total).
+salesSummaryRouter.get('/grouped', validate({ query: salesGroupedQuerySchema }), listSalesGroupedHandler);
 salesSummaryRouter.get('/', validate({ query: salesListQuerySchema }), listSalesHandler);

@@ -662,6 +662,53 @@ export async function listSales(query: SalesListQuery) {
   };
 }
 
+export interface SalesGroupedQuery {
+  month: string;
+  search?: string;
+  salesType?: 'NEW' | 'RENEWAL';
+  zone?: string;
+}
+
+// Zone+type aggregation for the Sales Summary grouped view. Same filter
+// semantics as listSales, so group totals reflect only matching rows. All
+// groups for the month come back in one response (zone count is bounded);
+// the per-row drill-down goes through listSales with a zone filter.
+export async function listSalesGrouped(query: SalesGroupedQuery) {
+  const where: Prisma.SalesRowWhereInput = {
+    upload: { month: query.month },
+  };
+  if (query.salesType) where.salesType = query.salesType;
+  if (query.zone) where.zoneName = query.zone;
+  if (query.search) {
+    where.OR = SEARCH_FIELDS.map((f) => ({
+      [f]: { contains: query.search, mode: 'insensitive' },
+    }));
+  }
+
+  // Promise.all (not $transaction) — groupBy loses its result typing inside a
+  // transaction array, and strict read consistency isn't needed here.
+  const [groups, sum] = await Promise.all([
+    prisma.salesRow.groupBy({
+      by: ['zoneName', 'salesType'],
+      where,
+      _count: { _all: true },
+      _sum: { planAmount: true },
+      orderBy: [{ zoneName: 'asc' }, { salesType: 'asc' }],
+    }),
+    prisma.salesRow.aggregate({ where, _sum: { planAmount: true } }),
+  ]);
+
+  return {
+    groups: groups.map((g) => ({
+      zoneName: g.zoneName,
+      salesType: g.salesType,
+      count: g._count._all,
+      totalPlanAmount: Number(g._sum.planAmount ?? 0),
+    })),
+    totalPlanAmount: Number(sum._sum.planAmount ?? 0),
+  };
+}
+
 export async function getSalesFilterOptions(month: string) {
   const distinct = async (field: 'zoneName' | 'operatorName' | 'site' | 'userCurrentStatus' | 'modeOfRenew') => {
     const rows = await prisma.salesRow.findMany({
