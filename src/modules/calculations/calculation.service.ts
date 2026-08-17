@@ -249,6 +249,15 @@ export async function listCalculations(query: ListCalculationsQuery) {
   return { items, meta: pageMeta(page, pageSize, total) };
 }
 
+// Distinct calculation months (desc) for the month filter dropdown.
+export async function listCalculationMonths() {
+  const groups = await prisma.commissionCalculation.groupBy({
+    by: ['month'],
+    orderBy: { month: 'desc' },
+  });
+  return groups.map((g) => g.month);
+}
+
 export async function getCalculation(id: string) {
   const calc = await prisma.commissionCalculation.findUnique({ where: { id }, include: calcInclude });
   if (!calc) throw ApiError.notFound('Calculation not found');
