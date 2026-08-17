@@ -2,6 +2,7 @@ import { Prisma } from '@prisma/client';
 import { prisma } from '../../lib/prisma.js';
 import { ApiError } from '../../utils/ApiError.js';
 import { writeAudit, diffChanges } from '../../lib/audit.js';
+import { storage } from '../../lib/storage.js';
 import { pageMeta } from '../../utils/apiResponse.js';
 import { getNumberSetting, DEFAULT_GST_KEY } from '../../lib/settings.js';
 import { computeCommission, type CommissionInput } from './commission.engine.js';
@@ -264,52 +265,68 @@ export async function getCalculation(id: string) {
   return calc;
 }
 
-// Deletable = not yet in (or bounced out of) the approval workflow.
-// SUBMITTED/APPROVED are locked: approved calcs may have bills/payouts linked
-// and form the audit trail.
-const DELETABLE_STATUSES = ['DRAFT', 'REJECTED'] as const;
-type DeletableStatus = (typeof DELETABLE_STATUSES)[number];
+// Any status is deletable (Admin only, enforced at the route). Approved calcs
+// may carry a bill (FK RESTRICTs the delete) and receipts with stored files, so
+// the delete removes the bill in the same transaction and then best-effort
+// cleans up stored files (bill PDF + receipt attachments). Breakdowns,
+// approvals, and payments cascade via the schema.
+async function destroyCalculation(id: string) {
+  const existing = await prisma.commissionCalculation.findUnique({
+    where: { id },
+    include: {
+      bill: { select: { id: true, billNumber: true, pdfPath: true } },
+      payments: { select: { attachmentPath: true } },
+    },
+  });
+  if (!existing) return null;
 
-const isDeletable = (status: string): status is DeletableStatus =>
-  (DELETABLE_STATUSES as readonly string[]).includes(status);
+  await prisma.$transaction(async (tx) => {
+    if (existing.bill) await tx.bill.delete({ where: { id: existing.bill.id } });
+    await tx.commissionCalculation.delete({ where: { id } });
+  });
+
+  // Storage cleanup after commit; a failed file delete never breaks the API call.
+  const files = [
+    existing.bill?.pdfPath,
+    ...existing.payments.map((p) => p.attachmentPath),
+  ].filter((f): f is string => !!f);
+  await Promise.allSettled(files.map((f) => storage.delete(f)));
+
+  return { status: existing.status, billNumber: existing.bill?.billNumber ?? null };
+}
 
 export async function deleteCalculation(id: string, actorId: string) {
-  const existing = await prisma.commissionCalculation.findUnique({ where: { id } });
-  if (!existing) throw ApiError.notFound('Calculation not found');
-  if (!isDeletable(existing.status)) {
-    throw ApiError.conflict('Only DRAFT or REJECTED calculations can be deleted');
-  }
-  await prisma.commissionCalculation.delete({ where: { id } });
+  const deleted = await destroyCalculation(id);
+  if (!deleted) throw ApiError.notFound('Calculation not found');
   await writeAudit({
     userId: actorId,
     action: 'CALCULATION_DELETED',
     entityType: 'CommissionCalculation',
     entityId: id,
+    metadata: { status: deleted.status, billNumber: deleted.billNumber },
   });
   return { id };
 }
 
-// Best-effort bulk delete: rows that are locked (SUBMITTED/APPROVED) or already
-// gone are skipped and reported, not fatal — the client's table is a snapshot
-// and a row's status can change between render and delete.
+// Best-effort bulk delete: rows already gone are skipped and reported, not
+// fatal — the client's table is a snapshot.
 export async function bulkDeleteCalculations(ids: string[], actorId: string) {
-  const found = await prisma.commissionCalculation.findMany({
-    where: { id: { in: ids } },
-    select: { id: true, status: true },
-  });
-  const deletableIds = found.filter((c) => isDeletable(c.status)).map((c) => c.id);
-  const deletableSet = new Set(deletableIds);
-  const skippedIds = ids.filter((id) => !deletableSet.has(id));
+  const deleted: { id: string; status: string; billNumber: string | null }[] = [];
+  const skippedIds: string[] = [];
+  for (const id of ids) {
+    const result = await destroyCalculation(id);
+    if (result) deleted.push({ id, ...result });
+    else skippedIds.push(id);
+  }
 
-  if (deletableIds.length > 0) {
-    await prisma.commissionCalculation.deleteMany({ where: { id: { in: deletableIds } } });
+  if (deleted.length > 0) {
     await writeAudit({
       userId: actorId,
       action: 'CALCULATIONS_BULK_DELETED',
       entityType: 'CommissionCalculation',
-      metadata: { deletedIds: deletableIds, skippedIds },
+      metadata: { deleted, skippedIds },
     });
   }
 
-  return { deletedCount: deletableIds.length, skippedIds };
+  return { deletedCount: deleted.length, skippedIds };
 }
