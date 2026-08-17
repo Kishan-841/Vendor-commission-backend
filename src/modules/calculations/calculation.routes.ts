@@ -10,6 +10,7 @@ import {
 } from './calculation.schema.js';
 import {
   bulkDeleteCalculationsHandler,
+  calculationConfigHandler,
   createCalculationHandler,
   deleteCalculationHandler,
   getCalculationHandler,
@@ -24,8 +25,9 @@ calculationRouter.use(authenticate);
 
 // Read: both roles (Finance views calculations).
 calculationRouter.get('/', validate({ query: listCalculationsQuerySchema }), listCalculationsHandler);
-// Literal path BEFORE '/:id' so "months" isn't captured as an id.
+// Literal paths BEFORE '/:id' so they aren't captured as ids.
 calculationRouter.get('/months', listCalculationMonthsHandler);
+calculationRouter.get('/config', calculationConfigHandler);
 calculationRouter.get('/:id', validate({ params: idParamSchema }), getCalculationHandler);
 
 // Create/edit/delete: Admin only.

@@ -8,7 +8,6 @@ import { storage, contentTypeFor, safeFilePart } from '../../lib/storage.js';
 import {
   listVendorPayouts,
   listPayoutMonths,
-  getVendorPayoutDetail,
   getVendorLedger,
   recordPayment,
   updatePayment,
@@ -40,10 +39,6 @@ export const listVendorPayoutsHandler = asyncHandler(async (req: Request, res: R
 
 export const listPayoutMonthsHandler = asyncHandler(async (_req: Request, res: Response) => {
   return ok(res, await listPayoutMonths());
-});
-
-export const vendorPayoutDetailHandler = asyncHandler(async (req: Request, res: Response) => {
-  return ok(res, await getVendorPayoutDetail(req.params.vendorId));
 });
 
 export const vendorLedgerHandler = asyncHandler(async (req: Request, res: Response) => {
@@ -93,7 +88,9 @@ export const exportPayoutsHandler = asyncHandler(async (req: Request, res: Respo
     entityType: 'PayoutPayment',
     metadata: req.query as Record<string, unknown>,
   });
-  res.setHeader('Content-Type', 'text/csv; charset=utf-8');
-  res.setHeader('Content-Disposition', 'attachment; filename="vendor-payouts.csv"');
-  res.send('﻿' + csv); // BOM so Excel opens ₹/UTF-8 columns correctly
+  // BOM so Excel opens ₹/UTF-8 columns correctly.
+  return sendDownload(res, Buffer.from('﻿' + csv, 'utf8'), {
+    fileName: 'vendor-payouts.csv',
+    contentType: 'text/csv; charset=utf-8',
+  });
 });

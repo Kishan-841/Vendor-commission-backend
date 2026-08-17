@@ -17,6 +17,10 @@ export const listCalculationMonthsHandler = asyncHandler(async (_req: Request, r
   return ok(res, await calcService.listCalculationMonths());
 });
 
+export const calculationConfigHandler = asyncHandler(async (_req: Request, res: Response) => {
+  return ok(res, await calcService.getCalculationConfig());
+});
+
 export const getCalculationHandler = asyncHandler(async (req: Request, res: Response) => {
   const calc = await calcService.getCalculation(req.params.id);
   return ok(res, calc);

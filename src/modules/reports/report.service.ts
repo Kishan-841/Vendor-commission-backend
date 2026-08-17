@@ -1,6 +1,7 @@
 import ExcelJS from 'exceljs';
 import { Prisma } from '@prisma/client';
 import { prisma } from '../../lib/prisma.js';
+import { deriveRoundOff } from '../calculations/commission.engine.js';
 
 const toNum = (d: unknown) => Number(d ?? 0);
 const round2 = (n: number) => Math.round((n + Number.EPSILON) * 100) / 100;
@@ -292,7 +293,13 @@ function toVendorCommissionRow(c: CalcWithRelations): VendorCommissionRow {
     fixedPayAmount: fixedPay,
     gstAmount: gst,
     tdsAmount: tds,
-    roundOff: Math.round((final - (gross + fixedPay + gst - tds)) * 100) / 100,
+    roundOff: deriveRoundOff({
+      grossCommission: gross,
+      fixedPayAmount: fixedPay,
+      gstAmount: gst,
+      tdsAmount: tds,
+      finalPayable: final,
+    }),
     finalPayable: final,
   };
 }

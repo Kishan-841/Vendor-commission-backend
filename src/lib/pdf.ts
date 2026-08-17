@@ -1,4 +1,5 @@
 import PDFDocument from 'pdfkit';
+import { deriveRoundOff } from '../modules/calculations/commission.engine.js';
 
 // Collect a PDFKit document into a Buffer (no disk). Callers persist/stream it.
 function docToBuffer(doc: PDFKit.PDFDocument): Promise<Buffer> {
@@ -123,8 +124,13 @@ export function generateBillPdf(data: BillPdfData): Promise<Buffer> {
     summaryRow('TDS', '- ' + inr(data.tdsAmount));
     // Final payable is rounded to the whole rupee; show the adjustment so the
     // summary lines add up exactly to the final figure.
-    const roundOff =
-      Math.round((data.finalPayable - (data.grossCommission + fixedPay + data.gstAmount - data.tdsAmount)) * 100) / 100;
+    const roundOff = deriveRoundOff({
+      grossCommission: data.grossCommission,
+      fixedPayAmount: fixedPay,
+      gstAmount: data.gstAmount,
+      tdsAmount: data.tdsAmount,
+      finalPayable: data.finalPayable,
+    });
     if (roundOff !== 0) {
       summaryRow('Round Off', (roundOff > 0 ? '+ ' : '- ') + inr(Math.abs(roundOff)));
     }

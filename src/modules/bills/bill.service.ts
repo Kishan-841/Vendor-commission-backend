@@ -12,11 +12,19 @@ const billInclude = {
 } satisfies Prisma.BillInclude;
 
 // Bill number format: GZN/YYYYMM/0001 — sequential within the billing month.
+// Derived from the HIGHEST existing number (not a row count): bills can be
+// deleted (via calculation delete), and count+1 would then reissue a taken
+// number, permanently 409ing every later bill for the month.
 async function nextBillNumber(tx: Prisma.TransactionClient, billingMonth: string) {
   const monthKey = billingMonth.replace('-', ''); // 2026-07 -> 202607
-  const count = await tx.bill.count({ where: { billingMonth } });
-  const seq = String(count + 1).padStart(4, '0');
-  return `GZN/${monthKey}/${seq}`;
+  const prefix = `GZN/${monthKey}/`;
+  const last = await tx.bill.findFirst({
+    where: { billingMonth },
+    orderBy: { billNumber: 'desc' },
+    select: { billNumber: true },
+  });
+  const next = last ? parseInt(last.billNumber.slice(prefix.length), 10) + 1 : 1;
+  return `${prefix}${String(next).padStart(4, '0')}`;
 }
 
 export async function generateBill(calculationId: string, actorId: string) {
@@ -35,7 +43,8 @@ export async function generateBill(calculationId: string, actorId: string) {
   }
 
   // Create bill + line items atomically with a month-sequential bill number.
-  const bill = await prisma.$transaction(async (tx) => {
+  // One retry on a unique collision (two admins generating concurrently).
+  const createOnce = () => prisma.$transaction(async (tx) => {
     const billNumber = await nextBillNumber(tx, calc.month);
     return tx.bill.create({
       data: {
@@ -61,6 +70,16 @@ export async function generateBill(calculationId: string, actorId: string) {
       include: billInclude,
     });
   });
+  let bill;
+  try {
+    bill = await createOnce();
+  } catch (err) {
+    if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002') {
+      bill = await createOnce(); // concurrent generation raced us — retake the next number
+    } else {
+      throw err;
+    }
+  }
 
   // Render the PDF after the DB commit, store it, then attach its storage key.
   // If rendering ever fails, the bill still exists and the PDF can be regenerated.

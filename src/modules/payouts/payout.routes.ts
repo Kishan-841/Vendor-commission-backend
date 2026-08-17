@@ -11,7 +11,6 @@ import {
 import {
   listVendorPayoutsHandler,
   listPayoutMonthsHandler,
-  vendorPayoutDetailHandler,
   vendorLedgerHandler,
   recordPaymentHandler,
   updatePaymentHandler,
@@ -33,7 +32,6 @@ payoutRouter.get('/export', exportPayoutsHandler);
 payoutRouter.get('/vendors', validate({ query: listVendorPayoutsQuerySchema }), listVendorPayoutsHandler);
 payoutRouter.get('/vendors/:vendorId/ledger/pdf', validate({ params: vendorIdParamSchema }), vendorLedgerPdfHandler);
 payoutRouter.get('/vendors/:vendorId/ledger', validate({ params: vendorIdParamSchema }), vendorLedgerHandler);
-payoutRouter.get('/vendors/:vendorId', validate({ params: vendorIdParamSchema }), vendorPayoutDetailHandler);
 
 // Record a receipt (optional attachment). multer parses multipart before validate.
 payoutRouter.post(

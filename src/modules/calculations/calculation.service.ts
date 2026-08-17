@@ -92,6 +92,18 @@ interface Snapshot {
 }
 
 export async function createCalculation(input: CreateCalculationInput, actorId: string) {
+  // One calculation per vendor+month — same guard the sheet-generation flow
+  // has; without it the same month's commission can be approved and paid twice.
+  const duplicate = await prisma.commissionCalculation.findFirst({
+    where: { vendorId: input.vendorId, month: input.month },
+    select: { id: true, status: true },
+  });
+  if (duplicate) {
+    throw ApiError.conflict(
+      `A calculation for this vendor and ${input.month} already exists (${duplicate.status})`,
+    );
+  }
+
   const { engineInput, snapshot } = await buildComputation(input);
   const result = computeCommission(engineInput);
 
@@ -147,20 +159,42 @@ export async function updateCalculation(
   }
 
   // Merge the update over the existing record, then recompute from scratch.
+  // gstPercentage falls back to the stored snapshot like every other field —
+  // otherwise a manual GST override would silently revert to the vendor
+  // default on any later edit that omits it.
+  const existingZones = input.zones
+    ? null
+    : await prisma.commissionZoneBreakdown.findMany({ where: { calculationId: id } });
+  if (existingZones?.some((b) => !b.zoneId || !b.zoneType)) {
+    throw ApiError.badRequest(
+      'One of this calculation\'s zones no longer exists — reselect the zones to update it',
+    );
+  }
   const merged: CreateCalculationInput = {
     vendorId: input.vendorId ?? existing.vendorId,
     month: input.month ?? existing.month,
     billingPeriod: input.billingPeriod ?? existing.billingPeriod ?? undefined,
     totalSales: input.totalSales ?? Number(existing.totalSales),
-    gstPercentage: input.gstPercentage,
+    gstPercentage: input.gstPercentage ?? Number(existing.gstPercentage),
     zones:
       input.zones ??
-      (await prisma.commissionZoneBreakdown.findMany({ where: { calculationId: id } })).map((b) => ({
+      existingZones!.map((b) => ({
         zoneId: b.zoneId!,
         zoneType: b.zoneType!,
         commissionPercentage: Number(b.commissionPercentage),
       })),
   };
+
+  // Re-check the vendor+month uniqueness if either changed.
+  if (merged.vendorId !== existing.vendorId || merged.month !== existing.month) {
+    const duplicate = await prisma.commissionCalculation.findFirst({
+      where: { vendorId: merged.vendorId, month: merged.month, id: { not: id } },
+      select: { id: true },
+    });
+    if (duplicate) {
+      throw ApiError.conflict(`A calculation for this vendor and ${merged.month} already exists`);
+    }
+  }
 
   const { engineInput, snapshot } = await buildComputation(merged);
   const result = computeCommission(engineInput);
@@ -248,6 +282,12 @@ export async function listCalculations(query: ListCalculationsQuery) {
   ]);
 
   return { items, meta: pageMeta(page, pageSize, total) };
+}
+
+// Runtime config the calc dialog mirrors (so the client preview never
+// hard-codes a rate the backend actually reads from Settings).
+export async function getCalculationConfig() {
+  return { defaultGstPercentage: await getNumberSetting(DEFAULT_GST_KEY, 18) };
 }
 
 // Distinct calculation months (desc) for the month filter dropdown.

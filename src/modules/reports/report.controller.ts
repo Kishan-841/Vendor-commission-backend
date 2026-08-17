@@ -2,6 +2,7 @@ import type { Request, Response } from 'express';
 import { asyncHandler } from '../../utils/asyncHandler.js';
 import { ok } from '../../utils/apiResponse.js';
 import { writeAudit } from '../../lib/audit.js';
+import { sendDownload } from '../../utils/sendDownload.js';
 import {
   getZoneCommissionReport,
   buildZoneCommissionWorkbook,
@@ -37,12 +38,10 @@ export const vendorCommissionExportHandler = asyncHandler(async (req: Request, r
     entityType: 'Report',
     metadata: req.query as Record<string, unknown>,
   });
-  res.setHeader(
-    'Content-Type',
-    'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-  );
-  res.setHeader('Content-Disposition', `attachment; filename="${fileName}"`);
-  return res.send(buffer);
+  return sendDownload(res, buffer, {
+    fileName,
+    contentType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  });
 });
 
 export const zoneCommissionExportHandler = asyncHandler(async (req: Request, res: Response) => {
@@ -54,10 +53,8 @@ export const zoneCommissionExportHandler = asyncHandler(async (req: Request, res
     entityType: 'Report',
     metadata: req.query as Record<string, unknown>,
   });
-  res.setHeader(
-    'Content-Type',
-    'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-  );
-  res.setHeader('Content-Disposition', `attachment; filename="${fileName}"`);
-  return res.send(buffer);
+  return sendDownload(res, buffer, {
+    fileName,
+    contentType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  });
 });

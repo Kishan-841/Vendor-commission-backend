@@ -68,6 +68,22 @@ export function round2(n: number): number {
 
 const pct = (amount: number, percentage: number) => round2((amount * percentage) / 100);
 
+// Derive the round-off a stored calculation carries: finalPayable is rounded
+// to the whole rupee while components stay paise-precise. Single source of
+// truth for every surface that displays a "Round off" line.
+export function deriveRoundOff(parts: {
+  grossCommission: number;
+  fixedPayAmount: number;
+  gstAmount: number;
+  tdsAmount: number;
+  finalPayable: number;
+}): number {
+  return round2(
+    parts.finalPayable -
+      (parts.grossCommission + parts.fixedPayAmount + parts.gstAmount - parts.tdsAmount),
+  );
+}
+
 // Excel-driven variant: each zone carries its OWN sales (its aggregated plan
 // amount). AGR is applied per zone, then that zone's % — summed into the
 // vendor's gross. GST/TDS/final work exactly as in computeCommission.

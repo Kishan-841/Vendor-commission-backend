@@ -207,38 +207,61 @@ export async function uploadSalesSheet(
       });
     }
     version = existing.version + 1;
-    // Remove the previous file + rows (rows cascade on delete).
-    if (existing.filePath) await storage.delete(existing.filePath);
-    await prisma.salesUpload.delete({ where: { id: existing.id } });
   }
 
+  // New file goes to storage FIRST; the old upload is only removed inside the
+  // same transaction that creates its replacement. A failure anywhere leaves
+  // the previous version fully intact (at worst an orphaned new file).
   const filePath = await persistOriginal(month, file);
-  const upload = await prisma.salesUpload.create({
-    data: {
-      month,
-      salesType,
-      fileName: file.originalname,
-      filePath,
-      rowCount: rows.length,
-      columns: columns as unknown as Prisma.InputJsonValue,
-      locked: true,
-      status: 'UPLOADED',
-      version,
-      uploadedById: actorId,
+  const upload = await prisma.$transaction(
+    async (tx) => {
+      if (existing) {
+        // Replacing a locked sheet implicitly unlocks it — record that so the
+        // audit trail shows the lock was lifted before the data changed.
+        if (existing.locked) {
+          await writeAudit({
+            userId: actorId,
+            action: 'SALES_UNLOCKED',
+            entityType: 'SalesUpload',
+            entityId: existing.id,
+            metadata: { month, salesType, implicit: 'replaced' },
+          });
+        }
+        await tx.salesUpload.delete({ where: { id: existing.id } }); // rows cascade
+      }
+      const created = await tx.salesUpload.create({
+        data: {
+          month,
+          salesType,
+          fileName: file.originalname,
+          filePath,
+          rowCount: rows.length,
+          columns: columns as unknown as Prisma.InputJsonValue,
+          locked: true,
+          status: 'UPLOADED',
+          version,
+          uploadedById: actorId,
+        },
+      });
+      for (let i = 0; i < rows.length; i += INSERT_BATCH_SIZE) {
+        const batch = rows.slice(i, i + INSERT_BATCH_SIZE).map((r) => {
+          const { extra, ...fields } = r;
+          return {
+            ...fields,
+            uploadId: created.id,
+            extra: extra === null ? Prisma.JsonNull : (extra as unknown as Prisma.InputJsonValue),
+          };
+        });
+        await tx.salesRow.createMany({ data: batch as Prisma.SalesRowCreateManyInput[] });
+      }
+      return created;
     },
-  });
+    // Large sheets insert tens of thousands of rows — give the tx room.
+    { timeout: 120_000 },
+  );
 
-  for (let i = 0; i < rows.length; i += INSERT_BATCH_SIZE) {
-    const batch = rows.slice(i, i + INSERT_BATCH_SIZE).map((r) => {
-      const { extra, ...fields } = r;
-      return {
-        ...fields,
-        uploadId: upload.id,
-        extra: extra === null ? Prisma.JsonNull : (extra as unknown as Prisma.InputJsonValue),
-      };
-    });
-    await prisma.salesRow.createMany({ data: batch as Prisma.SalesRowCreateManyInput[] });
-  }
+  // Old file cleanup only after the swap committed.
+  if (existing?.filePath) await storage.delete(existing.filePath).catch(() => {});
 
   const unmatchedZoneNames = await computeUnmatchedZones(rows);
 
@@ -307,8 +330,14 @@ export async function setSalesUploadLock(id: string, locked: boolean, actorId: s
 export async function deleteSalesUpload(id: string, actorId: string) {
   const upload = await prisma.salesUpload.findUnique({ where: { id } });
   if (!upload) throw ApiError.notFound('Sales upload not found');
-  if (upload.filePath) await storage.delete(upload.filePath);
+  // The lock is a real invariant, not UI decoration: a locked sheet (the
+  // source of approved calculations) must be explicitly unlocked first.
+  if (upload.locked) {
+    throw ApiError.conflict('This sheet is locked — unlock it before deleting.');
+  }
   await prisma.salesUpload.delete({ where: { id } }); // rows cascade
+  // File cleanup only after the DB delete succeeded.
+  if (upload.filePath) await storage.delete(upload.filePath).catch(() => {});
   await writeAudit({
     userId: actorId,
     action: 'SALES_DELETED',
@@ -330,23 +359,28 @@ export async function getSalesUploadFile(id: string) {
 // Tab 2 — Calculations from a stored sheet (per-vendor + bulk)
 // ---------------------------------------------------------------------------
 
-// Load a month's stored rows (across its New + Renewal uploads) and aggregate
-// plan amount by (type, zoneNameLower). Throws if nothing is uploaded yet.
+// Aggregate a month's stored rows (across its New + Renewal uploads) by
+// (type, zoneNameLower) — a DB groupBy returns one row per zone+type instead
+// of streaming the whole month's rows into JS. Also returns the distinct zone
+// names so callers don't rescan the table for them.
 async function aggregateStoredMonth(month: string) {
   const uploadCount = await prisma.salesUpload.count({ where: { month } });
   if (uploadCount === 0) {
     throw ApiError.badRequest(`No sales sheet uploaded for ${month}. Please upload it first.`);
   }
-  const rows = await prisma.salesRow.findMany({
+  const groups = await prisma.salesRow.groupBy({
+    by: ['salesType', 'zoneName'],
     where: { upload: { month } },
-    select: { salesType: true, zoneName: true, planAmount: true },
+    _sum: { planAmount: true },
   });
   const agg: Record<ZoneType, Map<string, number>> = { NEW: new Map(), RENEWAL: new Map() };
-  for (const r of rows) {
-    const key = r.zoneName.toLowerCase();
-    agg[r.salesType].set(key, (agg[r.salesType].get(key) ?? 0) + Number(r.planAmount));
+  const zoneNames = new Set<string>();
+  for (const g of groups) {
+    zoneNames.add(g.zoneName);
+    const key = g.zoneName.toLowerCase();
+    agg[g.salesType].set(key, (agg[g.salesType].get(key) ?? 0) + Number(g._sum.planAmount ?? 0));
   }
-  return { agg };
+  return { agg, zoneNames };
 }
 
 type VendorWithZones = Prisma.VendorGetPayload<{
@@ -512,13 +546,10 @@ async function runBulkGeneration(
   vendorIds: string[] | 'all',
   actorId: string,
 ): Promise<BulkGenerateResult> {
-  const { agg } = await aggregateStoredMonth(month);
-
-  const rows = await prisma.salesRow.findMany({
-    where: { upload: { month } },
-    select: { zoneName: true },
-  });
-  const unmatchedZoneNames = await computeUnmatchedZones(rows);
+  const { agg, zoneNames } = await aggregateStoredMonth(month);
+  const unmatchedZoneNames = await computeUnmatchedZones(
+    [...zoneNames].map((zoneName) => ({ zoneName })),
+  );
 
   const vendors = await prisma.vendor.findMany({
     where: {

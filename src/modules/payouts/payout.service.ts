@@ -1,10 +1,11 @@
-import type { PayoutStatus } from '@prisma/client';
+import { Prisma, type PayoutStatus } from '@prisma/client';
 import { prisma } from '../../lib/prisma.js';
 import { ApiError } from '../../utils/ApiError.js';
 import { writeAudit, diffChanges } from '../../lib/audit.js';
 import { pageMeta } from '../../utils/apiResponse.js';
 import { storage } from '../../lib/storage.js';
 import { generateReceiptPdf, generateLedgerPdf } from '../../lib/pdf.js';
+import { deriveRoundOff } from '../calculations/commission.engine.js';
 import type { RecordPaymentInput } from './payout.schema.js';
 
 // Payouts operate on APPROVED calculations only — a payout IS an approved
@@ -12,11 +13,30 @@ import type { RecordPaymentInput } from './payout.schema.js';
 const APPROVED = { status: 'APPROVED' as const };
 
 const toNum = (d: unknown) => Number(d ?? 0);
+const round2 = (n: number) => Math.round((n + Number.EPSILON) * 100) / 100;
 
 function statusFor(total: number, paid: number): PayoutStatus {
-  if (total > 0 && paid >= total) return 'PAID';
+  // Epsilon guard: float accumulation (e.g. 16007.999999999998 vs 16008.00)
+  // must not hold a fully paid calc at PARTIAL forever.
+  if (total > 0 && paid >= total - 0.005) return 'PAID';
   if (paid > 0) return 'PARTIAL';
   return 'PENDING';
+}
+
+// Retry helper for payment mutations: a unique-receipt-number collision
+// (P2002) or an optimistic-concurrency conflict (409) from a simultaneous
+// payment is safe to retry once against fresh state.
+async function withPaymentRetry<T>(fn: () => Promise<T>): Promise<T> {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await fn();
+    } catch (err) {
+      const retryable =
+        (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002') ||
+        (err instanceof ApiError && err.statusCode === 409);
+      if (!retryable || attempt >= 1) throw err;
+    }
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -134,69 +154,22 @@ export async function listVendorPayouts(query: {
 }
 
 // ---------------------------------------------------------------------------
-// Vendor detail: month-wise approved calcs with their payments
-// ---------------------------------------------------------------------------
-
-export async function getVendorPayoutDetail(vendorId: string) {
-  const vendor = await prisma.vendor.findUnique({
-    where: { id: vendorId },
-    select: {
-      id: true,
-      vendorName: true,
-      companyName: true,
-      status: true,
-      email: true,
-      mobileNumber: true,
-    },
-  });
-  if (!vendor) throw ApiError.notFound('Vendor not found');
-
-  const calculations = await prisma.commissionCalculation.findMany({
-    where: { vendorId, ...APPROVED },
-    orderBy: { month: 'desc' },
-    include: {
-      bill: { select: { id: true, billNumber: true } },
-      payments: {
-        orderBy: { paymentDate: 'desc' },
-        include: { paidBy: { select: { name: true } } },
-      },
-    },
-  });
-
-  const totalCommission = calculations.reduce((s, c) => s + toNum(c.finalPayable), 0);
-  const totalPaid = calculations.reduce((s, c) => s + toNum(c.paidAmount), 0);
-  const allPayments = calculations.flatMap((c) => c.payments);
-  const lastPayment = allPayments.reduce<Date | null>(
-    (latest, p) => (!latest || p.paymentDate > latest ? p.paymentDate : latest),
-    null,
-  );
-
-  return {
-    vendor,
-    summary: {
-      totalCommission,
-      totalPaid,
-      totalPending: Math.max(0, totalCommission - totalPaid),
-      paymentStatus: statusFor(totalCommission, totalPaid),
-      calculationCount: calculations.length,
-      paymentCount: allPayments.length,
-      lastPaymentDate: lastPayment?.toISOString() ?? null,
-    },
-    calculations,
-  };
-}
-
-// ---------------------------------------------------------------------------
 // Record / delete a payment (calc totals cached in the same transaction)
 // ---------------------------------------------------------------------------
 
 // Generate the next unique receipt number for a payment date's month:
-// RCPT-YYYYMM-NNNN (sequential within the month).
-async function nextReceiptNumber(paymentDate: Date): Promise<string> {
+// RCPT-YYYYMM-NNNN. Derived from the HIGHEST existing number (not a row
+// count) so mid-sequence deletions never regenerate a taken number.
+async function nextReceiptNumber(db: Prisma.TransactionClient, paymentDate: Date): Promise<string> {
   const ym = `${paymentDate.getUTCFullYear()}${String(paymentDate.getUTCMonth() + 1).padStart(2, '0')}`;
   const prefix = `RCPT-${ym}-`;
-  const count = await prisma.payoutPayment.count({ where: { receiptNumber: { startsWith: prefix } } });
-  return `${prefix}${String(count + 1).padStart(4, '0')}`;
+  const last = await db.payoutPayment.findFirst({
+    where: { receiptNumber: { startsWith: prefix } },
+    orderBy: { receiptNumber: 'desc' },
+    select: { receiptNumber: true },
+  });
+  const next = last?.receiptNumber ? parseInt(last.receiptNumber.slice(prefix.length), 10) + 1 : 1;
+  return `${prefix}${String(next).padStart(4, '0')}`;
 }
 
 export async function recordPayment(
@@ -205,49 +178,60 @@ export async function recordPayment(
   actorId: string,
   attachmentPath?: string | null,
 ) {
-  const calc = await prisma.commissionCalculation.findUnique({
-    where: { id: calculationId },
-    select: { id: true, status: true, finalPayable: true, paidAmount: true, vendorId: true, month: true },
-  });
-  if (!calc) throw ApiError.notFound('Calculation not found');
-  if (calc.status !== 'APPROVED') {
-    throw ApiError.badRequest('Only APPROVED calculations can be paid');
-  }
-
-  const outstanding = toNum(calc.finalPayable) - toNum(calc.paidAmount);
-  // Tiny epsilon so "pay exactly the outstanding" never trips on decimal noise.
-  if (input.paidAmount > outstanding + 0.005) {
-    throw ApiError.badRequest(
-      `Paid amount exceeds the outstanding balance (₹${outstanding.toFixed(2)})`,
-    );
-  }
-
   const paymentDate = new Date(`${input.paymentDate}T00:00:00Z`);
-  const receiptNumber = await nextReceiptNumber(paymentDate);
-  const newPaid = toNum(calc.paidAmount) + input.paidAmount;
-  const [payment, updated] = await prisma.$transaction([
-    prisma.payoutPayment.create({
-      data: {
-        calculationId,
-        receiptNumber,
-        paidAmount: input.paidAmount,
-        paymentDate,
-        paymentMode: input.paymentMode,
-        paymentReference: input.paymentReference || null,
-        notes: input.notes || null,
-        attachmentPath: attachmentPath || null,
-        paidById: actorId,
-      },
-      include: { paidBy: { select: { name: true } } },
+
+  const { payment, updated, calc } = await withPaymentRetry(() =>
+    prisma.$transaction(async (tx) => {
+      const calc = await tx.commissionCalculation.findUnique({
+        where: { id: calculationId },
+        select: { id: true, status: true, finalPayable: true, paidAmount: true, vendorId: true, month: true },
+      });
+      if (!calc) throw ApiError.notFound('Calculation not found');
+      if (calc.status !== 'APPROVED') {
+        throw ApiError.badRequest('Only APPROVED calculations can be paid');
+      }
+
+      const outstanding = toNum(calc.finalPayable) - toNum(calc.paidAmount);
+      // Tiny epsilon so "pay exactly the outstanding" never trips on decimal noise.
+      if (input.paidAmount > outstanding + 0.005) {
+        throw ApiError.badRequest(
+          `Paid amount exceeds the outstanding balance (₹${outstanding.toFixed(2)})`,
+        );
+      }
+
+      const receiptNumber = await nextReceiptNumber(tx, paymentDate);
+      const newPaid = round2(toNum(calc.paidAmount) + input.paidAmount);
+      const payment = await tx.payoutPayment.create({
+        data: {
+          calculationId,
+          receiptNumber,
+          paidAmount: input.paidAmount,
+          paymentDate,
+          paymentMode: input.paymentMode,
+          paymentReference: input.paymentReference || null,
+          notes: input.notes || null,
+          attachmentPath: attachmentPath || null,
+          paidById: actorId,
+        },
+        include: { paidBy: { select: { name: true } } },
+      });
+      // Optimistic guard: apply the new total only if paidAmount is unchanged
+      // since our read. A concurrent payment makes this count 0 → the whole
+      // transaction (including the payment row) rolls back and retries.
+      const guarded = await tx.commissionCalculation.updateMany({
+        where: { id: calculationId, paidAmount: calc.paidAmount },
+        data: {
+          paidAmount: newPaid,
+          paymentStatus: statusFor(toNum(calc.finalPayable), newPaid),
+        },
+      });
+      if (guarded.count === 0) {
+        throw ApiError.conflict('Another payment was recorded at the same time — please retry');
+      }
+      const updated = await tx.commissionCalculation.findUniqueOrThrow({ where: { id: calculationId } });
+      return { payment, updated, calc };
     }),
-    prisma.commissionCalculation.update({
-      where: { id: calculationId },
-      data: {
-        paidAmount: newPaid,
-        paymentStatus: statusFor(toNum(calc.finalPayable), newPaid),
-      },
-    }),
-  ]);
+  );
 
   await writeAudit({
     userId: actorId,
@@ -274,46 +258,57 @@ export async function updatePayment(
   actorId: string,
   attachmentPath?: string | null,
 ) {
-  const payment = await prisma.payoutPayment.findUnique({
-    where: { id: paymentId },
-    include: { calculation: { select: { id: true, finalPayable: true, paidAmount: true } } },
-  });
-  if (!payment) throw ApiError.notFound('Receipt not found');
+  const { payment, updatedPayment, updatedCalc, oldAttachment } = await withPaymentRetry(() =>
+    prisma.$transaction(async (tx) => {
+      const payment = await tx.payoutPayment.findUnique({
+        where: { id: paymentId },
+        include: { calculation: { select: { id: true, finalPayable: true, paidAmount: true } } },
+      });
+      if (!payment) throw ApiError.notFound('Receipt not found');
 
-  // Outstanding excluding this receipt's current amount.
-  const otherPaid = toNum(payment.calculation.paidAmount) - toNum(payment.paidAmount);
-  const outstanding = toNum(payment.calculation.finalPayable) - otherPaid;
-  if (input.paidAmount > outstanding + 0.005) {
-    throw ApiError.badRequest(`Amount exceeds the outstanding balance (₹${outstanding.toFixed(2)})`);
-  }
+      // Outstanding excluding this receipt's current amount.
+      const otherPaid = toNum(payment.calculation.paidAmount) - toNum(payment.paidAmount);
+      const outstanding = toNum(payment.calculation.finalPayable) - otherPaid;
+      if (input.paidAmount > outstanding + 0.005) {
+        throw ApiError.badRequest(`Amount exceeds the outstanding balance (₹${outstanding.toFixed(2)})`);
+      }
 
-  // Remove the old attachment if a new one replaces it.
-  if (attachmentPath !== undefined && payment.attachmentPath) {
-    await storage.delete(payment.attachmentPath);
-  }
-
-  const newPaid = otherPaid + input.paidAmount;
-  const [updatedPayment, updatedCalc] = await prisma.$transaction([
-    prisma.payoutPayment.update({
-      where: { id: paymentId },
-      data: {
-        paidAmount: input.paidAmount,
-        paymentDate: new Date(`${input.paymentDate}T00:00:00Z`),
-        paymentMode: input.paymentMode,
-        paymentReference: input.paymentReference || null,
-        notes: input.notes || null,
-        ...(attachmentPath !== undefined ? { attachmentPath: attachmentPath || null } : {}),
-      },
-      include: { paidBy: { select: { name: true } } },
+      const newPaid = round2(otherPaid + input.paidAmount);
+      const updatedPayment = await tx.payoutPayment.update({
+        where: { id: paymentId },
+        data: {
+          paidAmount: input.paidAmount,
+          paymentDate: new Date(`${input.paymentDate}T00:00:00Z`),
+          paymentMode: input.paymentMode,
+          paymentReference: input.paymentReference || null,
+          notes: input.notes || null,
+          ...(attachmentPath !== undefined ? { attachmentPath: attachmentPath || null } : {}),
+        },
+        include: { paidBy: { select: { name: true } } },
+      });
+      // Optimistic guard against a concurrent payment on the same calc.
+      const guarded = await tx.commissionCalculation.updateMany({
+        where: { id: payment.calculation.id, paidAmount: payment.calculation.paidAmount },
+        data: {
+          paidAmount: newPaid,
+          paymentStatus: statusFor(toNum(payment.calculation.finalPayable), newPaid),
+        },
+      });
+      if (guarded.count === 0) {
+        throw ApiError.conflict('Another payment changed this payout at the same time — please retry');
+      }
+      const updatedCalc = await tx.commissionCalculation.findUniqueOrThrow({
+        where: { id: payment.calculation.id },
+      });
+      return { payment, updatedPayment, updatedCalc, oldAttachment: payment.attachmentPath };
     }),
-    prisma.commissionCalculation.update({
-      where: { id: payment.calculation.id },
-      data: {
-        paidAmount: newPaid,
-        paymentStatus: statusFor(toNum(payment.calculation.finalPayable), newPaid),
-      },
-    }),
-  ]);
+  );
+
+  // Remove the replaced attachment only after the transaction committed — a
+  // rolled-back update must not have destroyed the existing file.
+  if (attachmentPath !== undefined && oldAttachment) {
+    await storage.delete(oldAttachment).catch(() => {});
+  }
 
   await writeAudit({
     userId: actorId,
@@ -337,25 +332,34 @@ export async function updatePayment(
 }
 
 export async function deletePayment(paymentId: string, actorId: string) {
-  const payment = await prisma.payoutPayment.findUnique({
-    where: { id: paymentId },
-    include: { calculation: { select: { id: true, finalPayable: true, paidAmount: true } } },
-  });
-  if (!payment) throw ApiError.notFound('Payment not found');
+  const payment = await withPaymentRetry(() =>
+    prisma.$transaction(async (tx) => {
+      const payment = await tx.payoutPayment.findUnique({
+        where: { id: paymentId },
+        include: { calculation: { select: { id: true, finalPayable: true, paidAmount: true } } },
+      });
+      if (!payment) throw ApiError.notFound('Payment not found');
 
-  if (payment.attachmentPath) await storage.delete(payment.attachmentPath);
-
-  const newPaid = Math.max(0, toNum(payment.calculation.paidAmount) - toNum(payment.paidAmount));
-  await prisma.$transaction([
-    prisma.payoutPayment.delete({ where: { id: paymentId } }),
-    prisma.commissionCalculation.update({
-      where: { id: payment.calculation.id },
-      data: {
-        paidAmount: newPaid,
-        paymentStatus: statusFor(toNum(payment.calculation.finalPayable), newPaid),
-      },
+      const newPaid = round2(
+        Math.max(0, toNum(payment.calculation.paidAmount) - toNum(payment.paidAmount)),
+      );
+      await tx.payoutPayment.delete({ where: { id: paymentId } });
+      const guarded = await tx.commissionCalculation.updateMany({
+        where: { id: payment.calculation.id, paidAmount: payment.calculation.paidAmount },
+        data: {
+          paidAmount: newPaid,
+          paymentStatus: statusFor(toNum(payment.calculation.finalPayable), newPaid),
+        },
+      });
+      if (guarded.count === 0) {
+        throw ApiError.conflict('Another payment changed this payout at the same time — please retry');
+      }
+      return payment;
     }),
-  ]);
+  );
+
+  // File cleanup only after the DB delete committed.
+  if (payment.attachmentPath) await storage.delete(payment.attachmentPath).catch(() => {});
 
   await writeAudit({
     userId: actorId,
@@ -479,7 +483,13 @@ export async function getVendorLedger(vendorId: string) {
         fixedPayAmount: fixedPay,
         gstAmount: gst,
         tdsAmount: tds,
-        roundOff: Math.round((final - (gross + fixedPay + gst - tds)) * 100) / 100,
+        roundOff: deriveRoundOff({
+          grossCommission: gross,
+          fixedPayAmount: fixedPay,
+          gstAmount: gst,
+          tdsAmount: tds,
+          finalPayable: final,
+        }),
         finalPayable: final,
       },
       sortKey: genDate.getTime(),

@@ -114,10 +114,8 @@ export const filterOptionsHandler = asyncHandler(async (req: Request, res: Respo
 export const exportWorkbookHandler = asyncHandler(async (req: Request, res: Response) => {
   const { month, vendorId } = req.query as unknown as { month: string; vendorId: string };
   const { buffer, fileName } = await buildVendorMonthWorkbook(month, vendorId, req.user!.id);
-  res.setHeader(
-    'Content-Type',
-    'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-  );
-  res.setHeader('Content-Disposition', `attachment; filename="${fileName}"`);
-  return res.send(buffer);
+  return sendDownload(res, buffer, {
+    fileName,
+    contentType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  });
 });
